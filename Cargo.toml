@@ -1,0 +1,23 @@
+[package]
+name = "geneshaft"
+description = "Ultimate build system"
+version = "0.1.0"
+authors = ["K. <kayo@illumium.org>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies.derive_deref]
+version = "^1"
+
+[dependencies.serde]
+version = "^1"
+features = ["derive"]
+
+[dependencies.async-std]
+version = "^1"
+features = ["attributes"]
+
+[dependencies.rhai]
+version = "^0.19"
+features = ["serde"]
