@@ -1,3 +1,5 @@
 { pkgs ? import <nixpkgs> {} }:
 with pkgs;
-mkShell {}
+mkShell {
+  buildInputs = [ pkg-config lzma ];
+}

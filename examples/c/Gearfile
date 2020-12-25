@@ -1,0 +1,61 @@
+/* -*- mode: js2 -*- */
+import { Scope, Artifact, Goal, Builder } from "gear";
+//import { Gcc } from "toolchain";
+
+let src_dir = base.child("src");
+let out_dir = base.child("target");
+let obj_dir = out_dir.child("obj");
+let bin_dir = out_dir;
+
+let build_goal = root.goal("build");
+
+function cc(src) {
+    let obj = obj_dir.output(src.name.replace(/.c$/, '.o'));
+    Builder(function() {
+        console.log("cc");
+        for (let input of this.inputs) {
+            console.log("input: ", input.path);
+        }
+        for (let output of this.outputs) {
+            console.log("output: ", output.path);
+        }
+    }, obj, src);
+    return obj;
+}
+
+function ld(name, objs) {
+    let bin = bin_dir.output(name);
+    Builder(function() {
+        console.log("ld");
+        for (let input of this.inputs) {
+            console.log("input: ", input.path);
+        }
+        for (let output of this.outputs) {
+            console.log("output: ", output.path);
+        }
+    }, bin, objs);
+    return bin;
+}
+
+export default async function() {
+    /*let gcc = await Gcc.config();
+
+    let gcc_cc = gcc.cc({
+        f: [],
+        W: [],
+    });
+
+    console.log(await gcc.search_dirs);*/
+
+    let srcs = [
+        "hello.c",
+        "bye.c",
+        "main.c"
+    ].map((src) => src_dir.input(src));
+
+    let objs = srcs.map(cc); // srcs.map((src) => gcc.compile(src));
+
+    let bin = ld("hello", objs); //gcc.link(objs);
+
+    build_goal.inputs = [bin];
+}

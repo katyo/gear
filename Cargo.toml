@@ -1,23 +1,84 @@
 [package]
-name = "geneshaft"
-description = "Ultimate build system"
+name = "gear"
+description = "Simple and flexible build system"
 version = "0.1.0"
 authors = ["K. <kayo@illumium.org>"]
 edition = "2018"
+readme = "README.md"
+homepage = "https://github.com/katyo/gear"
+repository = "https://github.com/katyo/gear"
+license = "Apache-2.0"
+keywords = ["make", "configure", "build", "command-line", "utility"]
+categories = ["command-line-utilities", "development-tools", "development-tools::build-utils"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[badges.maintenance]
+status = "experimental"
 
 [dependencies.derive_deref]
 version = "^1"
+
+[dependencies.structopt]
+version = "^0.3"
+features = ["paw"]
+
+[dependencies.paw]
+version = "^1"
+
+[dependencies.log]
+version = "^0.4"
+
+[dependencies.pretty_env_logger]
+version = "^0.4"
 
 [dependencies.serde]
 version = "^1"
 features = ["derive"]
 
+[dependencies.either]
+version = "^1"
+
+[dependencies.indexmap]
+version = "^1"
+
+[dependencies.fxhash]
+version = "^0.2"
+
+[dependencies.weak-table]
+version = "^0.3"
+
+[dependencies.nom]
+version = "^6"
+
+[dependencies.faccess]
+version = "^0.2"
+
+[dependencies.which]
+version = "^4"
+
+[dependencies.relative-path]
+version = "^1"
+
+[dependencies.futures]
+version = "^0.3"
+
 [dependencies.async-std]
 version = "^1"
-features = ["attributes"]
+features = ["attributes", "unstable"]
 
-[dependencies.rhai]
-version = "^0.19"
-features = ["serde"]
+[dependencies.async-process]
+version = "^1"
+
+[dependencies.async-fsw]
+version = "^0.2"
+
+[dependencies.rquickjs]
+#version = "^0"
+#git = "https://github.com/katyo/rquickjs"
+#branch = "macro"
+path = "../rquickjs"
+default-features = false
+features = ["exports", "loader", "either", "indexmap", "classes", "properties", "async-std", "macro"]
+
+[features]
+#default = ["parallel"]
+parallel = []

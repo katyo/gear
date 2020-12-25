@@ -1,80 +1,145 @@
+use crate::{qjs, Artifact, Mut, Ref, Result, Set, WeakArtifact, WeakSet};
 use derive_deref::Deref;
-use rhai::{Engine, RegisterFn};
-use std::rc::Rc;
+use either::Either;
+use std::{future::Future, iter::once, pin::Pin};
 
-use crate::{Artifact, Artifacts};
+/// The builder interface
+pub trait BuilderApi {
+    //// Get the list of values
+    //fn values(&self) -> Vec<Ref<Value>>;
 
-/// Builder
+    /// Get the list of inputs
+    fn inputs(&self) -> Vec<Artifact>;
+
+    /// Get the list of outputs
+    fn outputs(&self) -> Vec<Artifact>;
+
+    /// Run builder
+    fn build(&self) -> Pin<Box<dyn Future<Output = Result<()>>>>;
+}
+
 #[derive(Clone, Deref)]
-pub struct Builder(Rc<BuilderData>);
+pub struct Builder(Ref<dyn BuilderApi>);
 
-/// Builder
-pub struct BuilderData {
-    /// Command to execute
-    command: String,
-
-    /// Valiables list
-    variables: Vec<String>,
-    //
-    //outputs: Vec<>
+pub struct Internal {
+    inputs: Mut<Set<Artifact>>,
+    outputs: WeakSet<WeakArtifact>,
+    build: qjs::Persistent<qjs::Function<'static>>,
+    context: qjs::Context,
 }
 
-impl Builder {
-    /// Create new builder
-    pub fn new<S: Into<String>>(command: S) -> Self {
-        let command = command.into();
-        let variables = Vec::new();
-        Self(Rc::new(BuilderData { command, variables }))
-    }
-
-    /// Apply builder to artifacts
-    pub fn apply<A: Into<Artifacts>>(
-        &self,
-        inputs: A, /*, variables: Variables*/
-    ) -> Artifacts {
-        Artifacts::default()
-    }
-
-    pub fn register(engine: &mut Engine) {
-        engine
-            .register_type_with_name::<Self>("Builder")
-            .register_fn("Builder", Self::new::<&str>)
-            .register_fn("*", Self::apply::<Artifacts>)
-            .register_fn("*", Self::apply::<Artifact>);
+impl Drop for Internal {
+    fn drop(&mut self) {
+        log::debug!("JsBuilder::drop");
     }
 }
 
-/*
 #[derive(Clone, Deref)]
-pub struct BuilderInstance(Rc<BuilderInstanceData>);
+#[repr(transparent)]
+pub struct JsBuilder(Ref<Internal>);
 
-pub struct BuilderInstanceData {
-    builder: Builder,
-    //variables: Variables,
-    outputs: Artifacts,
-}
-
-impl BuilderInstance {
-    /// Create builder instance
-    pub fn new(builder: Builder) -> Self {
-        let outputs = Artifacts::default();
-
-        Self(Rc::new(BuilderInstanceData { builder, outputs }))
-    }
-
-    pub fn get_builder(&mut self) -> Builder {
-        self.builder.clone()
-    }
-
-    pub fn get_outputs(&mut self) -> Artifacts {
-        self.outputs.clone()
-    }
-
-    pub fn register(engine: &mut Engine) {
-        engine
-            .register_type_with_name::<Self>("BuilderInstance")
-            .register_get("builder", Self::get_builder)
-            .register_get("outputs", Self::get_outputs);
+impl JsBuilder {
+    fn to_dyn(&self) -> Builder {
+        Builder(Ref::new(self.0.clone()))
     }
 }
-*/
+
+impl BuilderApi for Ref<Internal> {
+    fn inputs(&self) -> Vec<Artifact> {
+        self.inputs.read().iter().cloned().collect()
+    }
+
+    fn outputs(&self) -> Vec<Artifact> {
+        self.outputs.iter().collect()
+    }
+
+    fn build(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+        let build = self.build.clone();
+        let context = self.context.clone();
+        let this = JsBuilder(self.clone());
+        Box::pin(async move {
+            let promise: qjs::Promise<()> =
+                context.with(|ctx| build.restore(ctx)?.call((qjs::This(this),)))?;
+            Ok(promise.await?)
+        })
+    }
+}
+
+#[qjs::bind(module, public)]
+#[quickjs(bare)]
+mod js {
+    pub use super::*;
+
+    #[quickjs(rename = "AnyBuilder")]
+    impl Builder {
+        pub fn new() -> Self {
+            unimplemented!();
+        }
+
+        #[quickjs(get)]
+        pub fn inputs(&self) -> Vec<Artifact> {
+            self.0.inputs()
+        }
+    }
+
+    #[quickjs(rename = "Builder")]
+    impl JsBuilder {
+        pub fn new<'js>(
+            ctx: qjs::Ctx<'js>,
+            build: qjs::Persistent<qjs::Function<'static>>,
+            outputs: qjs::Opt<Either<Vec<&Artifact>, &Artifact>>,
+            inputs: qjs::Opt<Either<Vec<&Artifact>, &Artifact>>,
+        ) -> Self {
+            let context = qjs::Context::from_ctx(ctx).unwrap();
+            let inputs = Mut::new(
+                inputs
+                    .0
+                    .map(|inputs| {
+                        inputs.either(
+                            |inputs| inputs.into_iter().cloned().collect(),
+                            |input| once(input.clone()).collect(),
+                        )
+                    })
+                    .unwrap_or_default(),
+            );
+            let outputs = outputs
+                .0
+                .map(|outputs| {
+                    outputs.either(
+                        |outputs| outputs.into_iter().cloned().collect(),
+                        |output| once(output.clone()).collect(),
+                    )
+                })
+                .unwrap_or_default();
+            log::debug!("JsBuilder::new");
+            let builder = Self(Ref::new(Internal {
+                inputs,
+                outputs,
+                build,
+                context,
+            }));
+            {
+                let dyn_builder = builder.to_dyn();
+                for output in &builder.0.outputs {
+                    output.set_builder(dyn_builder.clone());
+                }
+            }
+            builder
+        }
+
+        #[quickjs(get)]
+        pub fn inputs(&self) -> Vec<Artifact> {
+            self.0.inputs.read().iter().cloned().collect()
+        }
+
+        #[quickjs(rename = "inputs", set)]
+        pub fn set_inputs(&self, inputs: Vec<&Artifact>) {
+            *self.0.inputs.write() = inputs.into_iter().cloned().collect();
+        }
+
+        #[quickjs(get)]
+        pub fn outputs(&self) -> Vec<Artifact> {
+            self.0.outputs.iter().collect()
+        }
+    }
+}

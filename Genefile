@@ -1,7 +1,0 @@
-// -*- mode: rust, flycheck: 0 -*-
-
-let cc = Builder("gcc -c ${CFLAGS} -o ${@} ${^}");
-
-let main_c = Artifact("src/main.c");
-
-let main_o = cc * main_c;
