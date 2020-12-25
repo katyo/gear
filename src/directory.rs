@@ -1,8 +1,8 @@
-use crate::{qjs, Artifact, Ref, Result, WeakArtifactSet};
+use crate::{qjs, Actual, Artifact, ArtifactStore, Input, Output, Ref, Result};
 use relative_path::{RelativePath, RelativePathBuf};
 
 pub struct Internal {
-    artifacts: WeakArtifactSet,
+    artifacts: ArtifactStore,
     path: RelativePathBuf,
 }
 
@@ -10,8 +10,8 @@ pub struct Internal {
 #[repr(transparent)]
 pub struct Directory(Ref<Internal>);
 
-impl AsRef<WeakArtifactSet> for Directory {
-    fn as_ref(&self) -> &WeakArtifactSet {
+impl AsRef<ArtifactStore> for Directory {
+    fn as_ref(&self) -> &ArtifactStore {
         &self.0.artifacts
     }
 }
@@ -29,7 +29,7 @@ impl AsRef<RelativePath> for Directory {
 }
 
 impl Directory {
-    pub fn new<A: AsRef<WeakArtifactSet>, P: Into<RelativePathBuf>>(artifacts: A, path: P) -> Self {
+    pub fn new<A: AsRef<ArtifactStore>, P: Into<RelativePathBuf>>(artifacts: A, path: P) -> Self {
         Self(Ref::new(Internal {
             artifacts: artifacts.as_ref().clone(),
             path: path.into(),
@@ -40,17 +40,18 @@ impl Directory {
         Self::new(self, self.0.path.join(path))
     }
 
-    pub fn input<P: AsRef<RelativePath>>(&self, name: P) -> Artifact {
+    pub fn input<P: AsRef<RelativePath>>(&self, name: P) -> Result<Artifact<Input, Actual>> {
         Artifact::new(self, self.0.path.join(name).to_string())
     }
 
-    pub fn output<P: AsRef<RelativePath>>(&self, name: P) -> Result<Artifact> {
-        let path = self.0.path.join(name).to_string();
+    pub fn output<P: AsRef<RelativePath>>(&self, name: P) -> Result<Artifact<Output, Actual>> {
+        Artifact::new(self, self.0.path.join(name).to_string())
+        /*let path = self.0.path.join(name).to_string();
         let artifact = Artifact::new(self, &path);
         if artifact.has_builder() {
             return Err(format!("Output artifact already exists `{}`", path).into());
         }
-        Ok(artifact)
+        Ok(artifact)*/
     }
 }
 
@@ -71,7 +72,7 @@ mod js {
         }
 
         #[quickjs(rename = "child")]
-        pub fn child_js(&self, path: String) -> Self {
+        pub fn _child(&self, path: String) -> Self {
             self.child(path)
         }
 
@@ -84,12 +85,12 @@ mod js {
         }
 
         #[quickjs(rename = "input")]
-        pub fn input_js(&self, name: String) -> Artifact {
+        pub fn _input(&self, name: String) -> Result<Artifact<Input, Actual>> {
             self.input(name)
         }
 
         #[quickjs(rename = "output")]
-        pub fn output_js(&self, name: String) -> Result<Artifact> {
+        pub fn _output(&self, name: String) -> Result<Artifact<Output, Actual>> {
             self.output(name)
         }
     }

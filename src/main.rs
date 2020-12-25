@@ -1,10 +1,6 @@
 mod cmdline;
 
 use async_std::{fs::File, io::ReadExt};
-/*use gear::qjs::{
-    Accessor, BuiltinResolver, Context, FileResolver, Module, ModuleLoader, Promise,
-    Result as JsResult, Runtime, ScriptLoader, Value,
-};*/
 use gear::{qjs, Result};
 use std::{collections::HashMap, env};
 
@@ -55,7 +51,6 @@ async fn main(args: cmdline::Args) -> Result<()> {
                         gear::DirectoryJs,
                         gear::ArtifactJs,
                         gear::ScopeJs,
-                        gear::GoalJs,
                         gear::BuilderJs,
                     ),
                 )
@@ -69,11 +64,9 @@ async fn main(args: cmdline::Args) -> Result<()> {
 
     ctx.with(|ctx| ctx.globals().init_def::<gear::ConsoleJs>())?;
 
-    let artifacts = gear::WeakArtifactSet::default();
+    let artifacts = gear::ArtifactStore::default();
     let current_dir = gear::Directory::new(&artifacts, "");
-
-    let goals = gear::WeakGoalSet::default();
-    let root_scope = gear::Scope::new(&goals, "");
+    let root_scope = gear::Scope::new(&artifacts, "");
 
     ctx.with(|ctx| -> qjs::Result<()> {
         let globals = ctx.globals();

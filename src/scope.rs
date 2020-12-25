@@ -1,11 +1,11 @@
-use crate::{qjs, Goal, Mut, Ref, Set, WeakGoalSet};
+use crate::{qjs, Artifact, ArtifactStore, Input, Mut, Output, Phony, Ref, Result, Set};
 use std::{
     borrow::Borrow,
     hash::{Hash, Hasher},
 };
 
 pub struct Internal {
-    goals: WeakGoalSet,
+    artifacts: ArtifactStore,
     scopes: Mut<Set<Scope>>,
     name: String,
 }
@@ -20,9 +20,9 @@ impl Drop for Internal {
 #[repr(transparent)]
 pub struct Scope(Ref<Internal>);
 
-impl AsRef<WeakGoalSet> for Scope {
-    fn as_ref(&self) -> &WeakGoalSet {
-        &self.0.goals
+impl AsRef<ArtifactStore> for Scope {
+    fn as_ref(&self) -> &ArtifactStore {
+        &self.0.artifacts
     }
 }
 
@@ -65,11 +65,15 @@ impl Hash for Scope {
 }
 
 impl Scope {
-    pub fn new<W: AsRef<WeakGoalSet>, N: Into<String>>(goals: W, name: N) -> Self {
+    pub fn new<A, N>(artifacts: A, name: N) -> Self
+    where
+        A: AsRef<ArtifactStore>,
+        N: Into<String>,
+    {
         let name = name.into();
         log::debug!("Scope::new `{}`", name);
         Self(Ref::new(Internal {
-            goals: goals.as_ref().clone(),
+            artifacts: artifacts.as_ref().clone(),
             scopes: Default::default(),
             name,
         }))
@@ -89,8 +93,12 @@ impl Scope {
             })
     }
 
-    pub fn goal<N: AsRef<str>>(&self, name: N) -> Goal {
-        Goal::new(self, join_name(self, name))
+    pub fn input<N: AsRef<str>>(&self, name: N) -> Result<Artifact<Input, Phony>> {
+        Artifact::new(self, join_name(self, name))
+    }
+
+    pub fn output<N: AsRef<str>>(&self, name: N) -> Result<Artifact<Output, Phony>> {
+        Artifact::new(self, join_name(self, name))
     }
 }
 
@@ -125,9 +133,14 @@ mod js {
             self.scope(name)
         }
 
-        #[quickjs(rename = "goal")]
-        pub fn goal_js(&self, name: String) -> Goal {
-            self.goal(name)
+        #[quickjs(rename = "input")]
+        pub fn input_js(&self, name: String) -> Result<Artifact<Input, Phony>> {
+            self.input(name)
+        }
+
+        #[quickjs(rename = "output")]
+        pub fn output_js(&self, name: String) -> Result<Artifact<Output, Phony>> {
+            self.output(name)
         }
     }
 }

@@ -1,12 +1,32 @@
-use crate::{qjs, Builder, Mut, Ref, SystemTime, Weak, WeakElement, WeakKey, WeakSet};
-use derive_deref::Deref;
+use crate::{qjs, Builder, Mut, Ref, Result, SystemTime, Weak, WeakElement, WeakKey, WeakSet};
+use derive_deref::{Deref, DerefMut};
+use either::Either;
 use std::{
     borrow::Borrow,
+    fmt,
     hash::{Hash, Hasher},
+    marker::PhantomData,
 };
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub enum ArtifactKind {
+    Actual,
+    Phony,
+}
+
+impl fmt::Display for ArtifactKind {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Actual => "actual",
+            Self::Phony => "phony",
+        }
+        .fmt(f)
+    }
+}
 
 pub struct Internal {
     name: String,
+    kind: ArtifactKind,
     time: Mut<SystemTime>,
     builder: Mut<Option<Builder>>,
 }
@@ -40,70 +60,216 @@ impl Eq for Internal {}
 impl Hash for Internal {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);
+        self.kind.hash(state);
     }
 }
 
-#[derive(Clone)]
-#[repr(transparent)]
-pub struct Artifact(Ref<Internal>);
+pub trait IsArtifactUsage {
+    /*fn cast_usage<U, K>(this: Artifact<U, K>) -> Result<Artifact<Self, K>>
+    where
+    Self: Sized;*/
+    const REUSABLE: bool;
+}
 
-impl Borrow<str> for Artifact {
+pub struct Input;
+
+impl IsArtifactUsage for Input {
+    const REUSABLE: bool = true;
+    /*fn cast_usage<U, K>(this: Artifact<U, K>) -> Result<Artifact<Self, K>> {
+        Ok(Artifact(this.0, PhantomData))
+    }*/
+}
+
+pub struct Output;
+
+impl IsArtifactUsage for Output {
+    const REUSABLE: bool = false;
+    /*fn cast_usage<U, K>(this: Artifact<U, K>) -> Result<Artifact<Self, K>> {
+        if this.0.builder.read().is_some() {
+            Err(format!("Artifact `{}` already used as output", this.0.name).into())
+        } else {
+            Ok(Artifact(this.0, PhantomData))
+        }
+    }*/
+}
+
+pub trait IsArtifactKind {
+    const KIND: ArtifactKind;
+    fn set(store: &ArtifactStore) -> &Mut<WeakSet<WeakArtifact<(), Self>>>
+    where
+        Self: Sized;
+}
+
+pub struct Actual;
+
+impl IsArtifactKind for Actual {
+    const KIND: ArtifactKind = ArtifactKind::Actual;
+
+    fn set(store: &ArtifactStore) -> &Mut<WeakSet<WeakArtifact<(), Self>>> {
+        &store.actual
+    }
+}
+
+pub struct Phony;
+
+impl IsArtifactKind for Phony {
+    const KIND: ArtifactKind = ArtifactKind::Phony;
+
+    fn set(store: &ArtifactStore) -> &Mut<WeakSet<WeakArtifact<(), Self>>> {
+        &store.phony
+    }
+}
+
+#[repr(transparent)]
+pub struct Artifact<U = (), K = ()>(Ref<Internal>, PhantomData<(U, K)>);
+
+impl<U, K> Clone for Artifact<U, K> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), PhantomData)
+    }
+}
+
+impl<U, K> Borrow<str> for Artifact<U, K> {
     fn borrow(&self) -> &str {
         &self.0.name
     }
 }
 
-impl Borrow<String> for Artifact {
+impl<U, K> Borrow<String> for Artifact<U, K> {
     fn borrow(&self) -> &String {
         &self.0.name
     }
 }
 
-impl PartialEq for Artifact {
-    fn eq(&self, other: &Self) -> bool {
+impl<U, V, K> PartialEq<Artifact<V, K>> for Artifact<U, K> {
+    fn eq(&self, other: &Artifact<V, K>) -> bool {
         self.0 == other.0
     }
 }
 
-impl Eq for Artifact {}
+impl<U, K> Eq for Artifact<U, K> {}
 
-impl Hash for Artifact {
+impl<U, K> Hash for Artifact<U, K> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.hash(state);
     }
 }
 
-impl Artifact {
+impl<U, K> Artifact<U, K>
+where
+    U: IsArtifactUsage,
+    K: IsArtifactKind,
+{
     fn new_raw<S: Into<String>>(name: S) -> Self {
         let name = name.into();
         log::debug!("Artifact::new `{}`", name);
-        Self(Ref::new(Internal {
-            name: name.into(),
-            time: Mut::new(SystemTime::UNIX_EPOCH),
-            builder: Mut::new(None),
-        }))
+        Self(
+            Ref::new(Internal {
+                name: name.into(),
+                kind: K::KIND,
+                time: Mut::new(SystemTime::UNIX_EPOCH),
+                builder: Mut::new(None),
+            }),
+            PhantomData,
+        )
     }
 
-    pub fn new<A: AsRef<WeakArtifactSet>, S: Into<String>>(set: A, name: S) -> Self {
-        let set = set.as_ref();
+    pub fn new<A, S>(set: A, name: S) -> Result<Self>
+    where
+        A: AsRef<ArtifactStore>,
+        S: Into<String>,
+    {
+        let set = K::set(set.as_ref());
         let name = name.into();
         {
             // try reuse already existing artifact
             if let Some(artifact) = set.read().get(&name) {
-                return artifact;
+                return if U::REUSABLE {
+                    Ok(artifact.into_usage())
+                } else {
+                    Err(format!("Artifact `{}` already exists.", name).into())
+                };
             }
         }
         let artifact = Self::new_raw(name);
-        set.write().insert(artifact.clone());
-        artifact
+        set.write().insert(artifact.clone().into_usage());
+        Ok(artifact)
+    }
+}
+
+impl<U, K> Artifact<U, K> {
+    pub fn into_usage<T>(self) -> Artifact<T, K> {
+        Artifact(self.0, PhantomData)
+    }
+
+    pub fn ctor() -> Self {
+        unimplemented!()
+    }
+
+    pub fn name(&self) -> &String {
+        &self.0.name
     }
 
     pub fn time(&self) -> SystemTime {
         *self.0.time.read()
     }
 
+    pub fn weak(&self) -> WeakArtifact<U, K> {
+        WeakArtifact(Ref::downgrade(&self.0), PhantomData)
+    }
+}
+
+impl<K> From<Artifact<Input, K>> for Artifact<(), K> {
+    fn from(artifact: Artifact<Input, K>) -> Self {
+        Artifact(artifact.0, PhantomData)
+    }
+}
+
+impl<K> From<Artifact<Output, K>> for Artifact<(), K> {
+    fn from(artifact: Artifact<Output, K>) -> Self {
+        Artifact(artifact.0, PhantomData)
+    }
+}
+
+impl<K> From<Artifact<(), K>> for Artifact<Input, K> {
+    fn from(artifact: Artifact<(), K>) -> Self {
+        Artifact(artifact.0, PhantomData)
+    }
+}
+
+impl<K> From<Artifact<Output, K>> for Artifact<Input, K> {
+    fn from(artifact: Artifact<Output, K>) -> Self {
+        Artifact(artifact.0, PhantomData)
+    }
+}
+
+impl<U, K> Artifact<U, K> {
+    pub fn to_kind<T: IsArtifactKind>(self) -> Result<Artifact<U, T>> {
+        if T::KIND == self.0.kind {
+            Ok(Artifact(self.0, PhantomData))
+        } else {
+            Err(format!(
+                "Required {} artifact but actual artifact `{}` is {}",
+                T::KIND,
+                self.0.name,
+                self.0.kind
+            )
+            .into())
+        }
+    }
+}
+
+impl<K> Artifact<Output, K> {
     pub fn set_time(&self, time: SystemTime) {
         *self.0.time.write() = time;
+    }
+
+    pub fn builder(&self) -> Option<Builder> {
+        self.0.builder.read().clone()
+    }
+
+    pub fn input(&self) -> Artifact<Input, K> {
+        Artifact(self.0.clone(), PhantomData)
     }
 
     pub fn has_builder(&self) -> bool {
@@ -114,26 +280,54 @@ impl Artifact {
         *self.0.builder.write() = Some(builder);
     }
 
-    pub fn clear_builder(&self) {
+    /*pub fn clear_builder(&self) {
         *self.0.builder.write() = None;
-    }
+    }*/
+}
 
-    pub fn weak(&self) -> WeakArtifact {
-        WeakArtifact(Ref::downgrade(&self.0))
-    }
+#[derive(Clone, Deref, DerefMut)]
+pub struct AnyKind<A>(pub A);
+
+macro_rules! any_kind {
+	  ($($usage:ident $($kind:ident)*;)*) => {
+		    $(
+            impl<'js> qjs::FromJs<'js> for AnyKind<&Artifact<$usage>> {
+                fn from_js(ctx: qjs::Ctx<'js>, val: qjs::Value<'js>) -> qjs::Result<Self> {
+                    <&Artifact<$usage>>::from_js(ctx, val.clone())
+                        .map(AnyKind)
+                        $(
+                            .or_else(|error| {
+                                if error.is_from_js() {
+                                    <&Artifact<$usage, $kind>>::from_js(ctx, val.clone()).map(|this| {
+                                    AnyKind(unsafe { &*(this as *const Artifact<$usage, $kind> as *const _) })
+                                    })
+                                } else {
+                                    Err(error)
+                                }
+                            })
+                        )*
+                }
+            }
+        )*
+	  };
+}
+
+any_kind! {
+    Input Actual Phony;
+    Output Actual Phony;
 }
 
 #[derive(Clone)]
 #[repr(transparent)]
-pub struct WeakArtifact(Weak<Internal>);
+pub struct WeakArtifact<U = (), K = ()>(Weak<Internal>, PhantomData<(U, K)>);
 
-impl WeakArtifact {
-    pub fn try_ref(&self) -> Option<Artifact> {
-        self.0.upgrade().map(Artifact)
+impl<U, K> WeakArtifact<U, K> {
+    pub fn try_ref(&self) -> Option<Artifact<U, K>> {
+        self.0.upgrade().map(|raw| Artifact(raw, PhantomData))
     }
 }
 
-impl WeakKey for WeakArtifact {
+impl<U, K> WeakKey for WeakArtifact<U, K> {
     type Key = Internal;
 
     fn with_key<F, R>(view: &Self::Strong, f: F) -> R
@@ -144,8 +338,8 @@ impl WeakKey for WeakArtifact {
     }
 }
 
-impl WeakElement for WeakArtifact {
-    type Strong = Artifact;
+impl<U, K> WeakElement for WeakArtifact<U, K> {
+    type Strong = Artifact<U, K>;
 
     fn new(view: &Self::Strong) -> Self {
         view.weak()
@@ -160,11 +354,17 @@ impl WeakElement for WeakArtifact {
     }
 }
 
-#[derive(Default, Clone, Deref)]
-pub struct WeakArtifactSet(Ref<Mut<WeakSet<WeakArtifact>>>);
+#[derive(Default)]
+pub struct StoreInternal {
+    actual: Mut<WeakSet<WeakArtifact<(), Actual>>>,
+    phony: Mut<WeakSet<WeakArtifact<(), Phony>>>,
+}
 
-impl AsRef<WeakArtifactSet> for WeakArtifactSet {
-    fn as_ref(&self) -> &WeakArtifactSet {
+#[derive(Default, Clone, Deref)]
+pub struct ArtifactStore(Ref<StoreInternal>);
+
+impl AsRef<ArtifactStore> for ArtifactStore {
+    fn as_ref(&self) -> &ArtifactStore {
         &*self
     }
 }
@@ -174,20 +374,81 @@ impl AsRef<WeakArtifactSet> for WeakArtifactSet {
 mod js {
     pub use super::*;
 
-    impl Artifact {
-        #[quickjs(rename = "new")]
-        pub fn ctor() -> Self {
-            unimplemented!()
-        }
+    pub type GenericInput = Artifact<Input>;
 
-        #[quickjs(get)]
-        pub fn name(&self) -> &String {
-            &self.0.name
-        }
+    impl GenericInput {
+        #[quickjs(rename = "new", hide)]
+        pub fn ctor() -> Self {}
 
-        #[quickjs(get)]
-        pub fn builder(&self) -> Option<Builder> {
-            self.0.builder.read().clone()
-        }
+        #[quickjs(get, hide)]
+        pub fn name(&self) -> &String {}
+    }
+
+    pub type GenericOutput = Artifact<Output>;
+
+    impl GenericOutput {
+        #[quickjs(rename = "new", hide)]
+        pub fn ctor() -> Self {}
+
+        #[quickjs(get, hide)]
+        pub fn name(&self) -> &String {}
+
+        #[quickjs(get, hide)]
+        pub fn builder(&self) -> Option<Builder> {}
+
+        #[quickjs(get, hide)]
+        pub fn input(&self) -> Artifact<Input> {}
+    }
+
+    pub type ActualInput = Artifact<Input, Actual>;
+
+    impl ActualInput {
+        #[quickjs(rename = "new", hide)]
+        pub fn ctor() -> Self {}
+
+        #[quickjs(get, hide)]
+        pub fn name(&self) -> &String {}
+    }
+
+    pub type ActualOutput = Artifact<Output, Actual>;
+
+    impl ActualOutput {
+        #[quickjs(rename = "new", hide)]
+        pub fn ctor() -> Self {}
+
+        #[quickjs(get, hide)]
+        pub fn name(&self) -> &String {}
+
+        #[quickjs(get, hide)]
+        pub fn builder(&self) -> Option<Builder> {}
+
+        #[quickjs(get, hide)]
+        pub fn input(&self) -> Artifact<Input, Actual> {}
+    }
+
+    pub type PhonyInput = Artifact<Input, Phony>;
+
+    impl PhonyInput {
+        #[quickjs(rename = "new", hide)]
+        pub fn ctor() -> Self {}
+
+        #[quickjs(get, hide)]
+        pub fn name(&self) -> &String {}
+    }
+
+    pub type PhonyOutput = Artifact<Output, Phony>;
+
+    impl PhonyOutput {
+        #[quickjs(rename = "new", hide)]
+        pub fn ctor() -> Self {}
+
+        #[quickjs(get, hide)]
+        pub fn name(&self) -> &String {}
+
+        #[quickjs(get, hide)]
+        pub fn builder(&self) -> Option<Builder> {}
+
+        #[quickjs(get, hide)]
+        pub fn input(&self) -> Artifact<Input, Phony> {}
     }
 }
