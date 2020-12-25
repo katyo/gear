@@ -51,7 +51,7 @@ async fn main(args: cmdline::Args) -> Result<()> {
                         gear::DirectoryJs,
                         gear::ArtifactJs,
                         gear::ScopeJs,
-                        gear::BuilderJs,
+                        gear::RuleJs,
                     ),
                 )
                 .with_module("toolchain", gear::GccJs)

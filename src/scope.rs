@@ -1,7 +1,13 @@
-use crate::{qjs, Artifact, ArtifactStore, Input, Mut, Output, Phony, Ref, Result, Set};
+use crate::{
+    qjs, AnyKind, Artifact, ArtifactStore, Input, JsRule, Mut, NoRule, Output, Phony, Ref, Result,
+    Set,
+};
+use derive_deref::Deref;
+use either::Either;
 use std::{
     borrow::Borrow,
     hash::{Hash, Hasher},
+    iter::once,
 };
 
 pub struct Internal {
@@ -112,6 +118,9 @@ fn join_name<P: AsRef<str>, N: AsRef<str>>(parent: P, name: N) -> String {
     }
 }
 
+#[derive(Clone, Deref)]
+pub struct Goal<R>(R);
+
 #[qjs::bind(module, public)]
 #[quickjs(bare)]
 mod js {
@@ -141,6 +150,85 @@ mod js {
         #[quickjs(rename = "output")]
         pub fn output_js(&self, name: String) -> Result<Artifact<Output, Phony>> {
             self.output(name)
+        }
+
+        #[quickjs(rename = "goal")]
+        pub fn goal_fn<'js>(
+            &self,
+            name: String,
+            ctx: qjs::Ctx<'js>,
+            function: qjs::Persistent<qjs::Function<'static>>,
+        ) -> Result<Goal<JsRule>> {
+            let context = qjs::Context::from_ctx(ctx)?;
+            self.output(name).map(|output| {
+                Goal(JsRule::new_raw(
+                    Default::default(),
+                    once(output.into_kind_any()).collect(),
+                    function,
+                    context,
+                ))
+            })
+        }
+
+        pub fn goal(&self, name: String) -> Result<Goal<NoRule>> {
+            self.output(name).map(|output| {
+                Goal(NoRule::new_raw(
+                    Default::default(),
+                    once(output.into_kind_any()).collect(),
+                ))
+            })
+        }
+    }
+
+    pub type NoRuleGoal = Goal<NoRule>;
+
+    impl NoRuleGoal {
+        #[quickjs(get)]
+        pub fn input(&self) -> Option<Artifact<Input>> {
+            self.0
+                .outputs()
+                .into_iter()
+                .next()
+                .map(|output| output.input())
+        }
+
+        #[quickjs(get)]
+        pub fn inputs(&self) -> Vec<Artifact<Input>> {
+            self.0.inputs()
+        }
+
+        #[quickjs(rename = "inputs", set)]
+        pub fn set_inputs(
+            &self,
+            inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
+        ) {
+            self.0.set_inputs(inputs)
+        }
+    }
+
+    pub type JsRuleGoal = Goal<JsRule>;
+
+    impl JsRuleGoal {
+        #[quickjs(get)]
+        pub fn input(&self) -> Option<Artifact<Input>> {
+            self.0
+                .outputs()
+                .into_iter()
+                .next()
+                .map(|output| output.input())
+        }
+
+        #[quickjs(get)]
+        pub fn inputs(&self) -> Vec<Artifact<Input>> {
+            self.0.inputs()
+        }
+
+        #[quickjs(rename = "inputs", set)]
+        pub fn set_inputs(
+            &self,
+            inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
+        ) {
+            self.0.set_inputs(inputs)
         }
     }
 }

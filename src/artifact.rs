@@ -1,6 +1,5 @@
-use crate::{qjs, Builder, Mut, Ref, Result, SystemTime, Weak, WeakElement, WeakKey, WeakSet};
+use crate::{qjs, Mut, Ref, Result, Rule, SystemTime, Weak, WeakElement, WeakKey, WeakSet};
 use derive_deref::{Deref, DerefMut};
-use either::Either;
 use std::{
     borrow::Borrow,
     fmt,
@@ -28,7 +27,7 @@ pub struct Internal {
     name: String,
     kind: ArtifactKind,
     time: Mut<SystemTime>,
-    builder: Mut<Option<Builder>>,
+    rule: Mut<Option<Rule>>,
 }
 
 impl Drop for Internal {
@@ -65,9 +64,6 @@ impl Hash for Internal {
 }
 
 pub trait IsArtifactUsage {
-    /*fn cast_usage<U, K>(this: Artifact<U, K>) -> Result<Artifact<Self, K>>
-    where
-    Self: Sized;*/
     const REUSABLE: bool;
 }
 
@@ -75,22 +71,12 @@ pub struct Input;
 
 impl IsArtifactUsage for Input {
     const REUSABLE: bool = true;
-    /*fn cast_usage<U, K>(this: Artifact<U, K>) -> Result<Artifact<Self, K>> {
-        Ok(Artifact(this.0, PhantomData))
-    }*/
 }
 
 pub struct Output;
 
 impl IsArtifactUsage for Output {
     const REUSABLE: bool = false;
-    /*fn cast_usage<U, K>(this: Artifact<U, K>) -> Result<Artifact<Self, K>> {
-        if this.0.builder.read().is_some() {
-            Err(format!("Artifact `{}` already used as output", this.0.name).into())
-        } else {
-            Ok(Artifact(this.0, PhantomData))
-        }
-    }*/
 }
 
 pub trait IsArtifactKind {
@@ -168,7 +154,7 @@ where
                 name: name.into(),
                 kind: K::KIND,
                 time: Mut::new(SystemTime::UNIX_EPOCH),
-                builder: Mut::new(None),
+                rule: Default::default(),
             }),
             PhantomData,
         )
@@ -244,7 +230,7 @@ impl<K> From<Artifact<Output, K>> for Artifact<Input, K> {
 }
 
 impl<U, K> Artifact<U, K> {
-    pub fn to_kind<T: IsArtifactKind>(self) -> Result<Artifact<U, T>> {
+    pub fn into_kind<T: IsArtifactKind>(self) -> Result<Artifact<U, T>> {
         if T::KIND == self.0.kind {
             Ok(Artifact(self.0, PhantomData))
         } else {
@@ -257,6 +243,10 @@ impl<U, K> Artifact<U, K> {
             .into())
         }
     }
+
+    pub fn into_kind_any(self) -> Artifact<U, ()> {
+        Artifact(self.0, PhantomData)
+    }
 }
 
 impl<K> Artifact<Output, K> {
@@ -264,25 +254,21 @@ impl<K> Artifact<Output, K> {
         *self.0.time.write() = time;
     }
 
-    pub fn builder(&self) -> Option<Builder> {
-        self.0.builder.read().clone()
+    pub fn rule(&self) -> Option<Rule> {
+        self.0.rule.read().clone()
     }
 
     pub fn input(&self) -> Artifact<Input, K> {
         Artifact(self.0.clone(), PhantomData)
     }
 
-    pub fn has_builder(&self) -> bool {
-        self.0.builder.read().is_some()
+    pub fn has_rule(&self) -> bool {
+        self.0.rule.read().is_some()
     }
 
-    pub fn set_builder(&self, builder: Builder) {
-        *self.0.builder.write() = Some(builder);
+    pub fn set_rule(&self, rule: Rule) {
+        *self.0.rule.write() = Some(rule);
     }
-
-    /*pub fn clear_builder(&self) {
-        *self.0.builder.write() = None;
-    }*/
 }
 
 #[derive(Clone, Deref, DerefMut)]
@@ -394,7 +380,7 @@ mod js {
         pub fn name(&self) -> &String {}
 
         #[quickjs(get, hide)]
-        pub fn builder(&self) -> Option<Builder> {}
+        pub fn rule(&self) -> Option<Rule> {}
 
         #[quickjs(get, hide)]
         pub fn input(&self) -> Artifact<Input> {}
@@ -420,7 +406,7 @@ mod js {
         pub fn name(&self) -> &String {}
 
         #[quickjs(get, hide)]
-        pub fn builder(&self) -> Option<Builder> {}
+        pub fn rule(&self) -> Option<Rule> {}
 
         #[quickjs(get, hide)]
         pub fn input(&self) -> Artifact<Input, Actual> {}
@@ -446,7 +432,7 @@ mod js {
         pub fn name(&self) -> &String {}
 
         #[quickjs(get, hide)]
-        pub fn builder(&self) -> Option<Builder> {}
+        pub fn rule(&self) -> Option<Rule> {}
 
         #[quickjs(get, hide)]
         pub fn input(&self) -> Artifact<Input, Phony> {}

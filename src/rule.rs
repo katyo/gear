@@ -4,7 +4,7 @@ use either::Either;
 use std::{future::Future, iter::once, pin::Pin};
 
 /// The builder interface
-pub trait BuilderApi {
+pub trait RuleApi {
     //// Get the list of values
     //fn values(&self) -> Vec<Ref<Value>>;
 
@@ -14,12 +14,12 @@ pub trait BuilderApi {
     /// Get the list of outputs
     fn outputs(&self) -> Vec<Artifact<Output>>;
 
-    /// Run builder
-    fn build(&self) -> Pin<Box<dyn Future<Output = Result<()>>>>;
+    /// Run rule
+    fn invoke(&self) -> Pin<Box<dyn Future<Output = Result<()>>>>;
 }
 
 #[derive(Clone, Deref)]
-pub struct Builder(Ref<dyn BuilderApi>);
+pub struct Rule(Ref<dyn RuleApi>);
 
 pub struct NoInternal {
     inputs: Mut<Set<Artifact<Input>>>,
@@ -28,34 +28,34 @@ pub struct NoInternal {
 
 impl Drop for NoInternal {
     fn drop(&mut self) {
-        log::debug!("NoBuilder::drop");
+        log::debug!("NoRule::drop");
     }
 }
 
 #[derive(Clone, Deref)]
 #[repr(transparent)]
-pub struct NoBuilder(Ref<NoInternal>);
+pub struct NoRule(Ref<NoInternal>);
 
-impl NoBuilder {
-    fn to_dyn(&self) -> Builder {
-        Builder(Ref::new(self.0.clone()))
+impl NoRule {
+    fn to_dyn(&self) -> Rule {
+        Rule(Ref::new(self.0.clone()))
     }
 
-    fn new_raw(inputs: Set<Artifact<Input>>, outputs: WeakSet<WeakArtifact<Output>>) -> Self {
+    pub fn new_raw(inputs: Set<Artifact<Input>>, outputs: WeakSet<WeakArtifact<Output>>) -> Self {
         let inputs = Mut::new(inputs);
         let this = Self(Ref::new(NoInternal { inputs, outputs }));
-        log::debug!("NoBuilder::new");
+        log::debug!("NoRule::new");
         {
-            let builder = this.to_dyn();
+            let rule = this.to_dyn();
             for output in &this.0.outputs {
-                output.set_builder(builder.clone());
+                output.set_rule(rule.clone());
             }
         }
         this
     }
 }
 
-impl BuilderApi for Ref<NoInternal> {
+impl RuleApi for Ref<NoInternal> {
     fn inputs(&self) -> Vec<Artifact<Input>> {
         self.inputs.read().iter().cloned().collect()
     }
@@ -64,7 +64,7 @@ impl BuilderApi for Ref<NoInternal> {
         self.outputs.iter().collect()
     }
 
-    fn build(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    fn invoke(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -74,50 +74,50 @@ pub struct JsInternal {
     inputs: Mut<Set<Artifact<Input>>>,
     outputs: WeakSet<WeakArtifact<Output>>,
     #[quickjs(has_refs)]
-    build: qjs::Persistent<qjs::Function<'static>>,
+    function: qjs::Persistent<qjs::Function<'static>>,
     context: qjs::Context,
 }
 
 impl Drop for JsInternal {
     fn drop(&mut self) {
-        log::debug!("JsBuilder::drop");
+        log::debug!("JsRule::drop");
     }
 }
 
 #[derive(Clone, Deref, qjs::HasRefs)]
 #[repr(transparent)]
-pub struct JsBuilder(#[quickjs(has_refs)] Ref<JsInternal>);
+pub struct JsRule(#[quickjs(has_refs)] Ref<JsInternal>);
 
-impl JsBuilder {
-    fn to_dyn(&self) -> Builder {
-        Builder(Ref::new(self.0.clone()))
+impl JsRule {
+    fn to_dyn(&self) -> Rule {
+        Rule(Ref::new(self.0.clone()))
     }
 
-    fn new_raw(
+    pub fn new_raw(
         inputs: Set<Artifact<Input>>,
         outputs: WeakSet<WeakArtifact<Output>>,
-        build: qjs::Persistent<qjs::Function<'static>>,
+        function: qjs::Persistent<qjs::Function<'static>>,
         context: qjs::Context,
     ) -> Self {
         let inputs = Mut::new(inputs);
         let this = Self(Ref::new(JsInternal {
             inputs,
             outputs,
-            build,
+            function,
             context,
         }));
-        log::debug!("JsBuilder::new");
+        log::debug!("JsRule::new");
         {
-            let builder = this.to_dyn();
+            let rule = this.to_dyn();
             for output in &this.0.outputs {
-                output.set_builder(builder.clone());
+                output.set_rule(rule.clone());
             }
         }
         this
     }
 }
 
-impl BuilderApi for Ref<JsInternal> {
+impl RuleApi for Ref<JsInternal> {
     fn inputs(&self) -> Vec<Artifact<Input>> {
         self.inputs.read().iter().cloned().collect()
     }
@@ -126,13 +126,13 @@ impl BuilderApi for Ref<JsInternal> {
         self.outputs.iter().collect()
     }
 
-    fn build(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-        let build = self.build.clone();
+    fn invoke(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+        let function = self.function.clone();
         let context = self.context.clone();
-        let this = JsBuilder(self.clone());
+        let this = JsRule(self.clone());
         Box::pin(async move {
             let promise: qjs::Promise<()> =
-                context.with(|ctx| build.restore(ctx)?.call((qjs::This(this),)))?;
+                context.with(|ctx| function.restore(ctx)?.call((qjs::This(this),)))?;
             Ok(promise.await?)
         })
     }
@@ -143,8 +143,8 @@ impl BuilderApi for Ref<JsInternal> {
 mod js {
     pub use super::*;
 
-    #[quickjs(rename = "AnyBuilder")]
-    impl Builder {
+    #[quickjs(rename = "AnyRule")]
+    impl Rule {
         pub fn new() -> Self {
             unimplemented!();
         }
@@ -160,9 +160,74 @@ mod js {
         }
     }
 
-    #[quickjs(rename = "NoBuilder")]
-    impl NoBuilder {
+    #[quickjs(rename = "Rule")]
+    pub fn rule_js1<'js>(
+        inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
+        outputs: Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>,
+        function: qjs::Persistent<qjs::Function<'static>>,
+        ctx: qjs::Ctx<'js>,
+    ) -> JsRule {
+        JsRule::new_(
+            function,
+            qjs::Opt(Some(outputs)),
+            qjs::Opt(Some(inputs)),
+            ctx,
+        )
+    }
+
+    #[quickjs(rename = "Rule")]
+    pub fn rule_js2<'js>(
+        outputs: Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>,
+        inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
+        function: qjs::Persistent<qjs::Function<'static>>,
+        ctx: qjs::Ctx<'js>,
+    ) -> JsRule {
+        JsRule::new_(
+            function,
+            qjs::Opt(Some(outputs)),
+            qjs::Opt(Some(inputs)),
+            ctx,
+        )
+    }
+
+    #[quickjs(rename = "Rule")]
+    pub fn rule_js3<'js>(
+        function: qjs::Persistent<qjs::Function<'static>>,
+        outputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>>,
+        inputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>>,
+        ctx: qjs::Ctx<'js>,
+    ) -> JsRule {
+        JsRule::new_(function, outputs, inputs, ctx)
+    }
+
+    #[quickjs(rename = "Rule")]
+    pub fn rule_no1<'js>(
+        inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
+        outputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>>,
+    ) -> NoRule {
+        NoRule::new_(outputs, qjs::Opt(Some(inputs)))
+    }
+
+    #[quickjs(rename = "Rule")]
+    pub fn rule_no2<'js>(
+        outputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>>,
+        inputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>>,
+    ) -> NoRule {
+        NoRule::new_(outputs, inputs)
+    }
+
+    #[quickjs(rename = "NoRule")]
+    impl NoRule {
+        #[quickjs(rename = "new")]
         pub fn new(
+            inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
+            outputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>>,
+        ) -> Self {
+            Self::new_(outputs, qjs::Opt(Some(inputs)))
+        }
+
+        #[quickjs(rename = "new")]
+        pub fn new_(
             outputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>>,
             inputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>>,
         ) -> Self {
@@ -209,13 +274,28 @@ mod js {
         }
     }
 
-    #[quickjs(rename = "FnBuilder", has_refs)]
-    impl JsBuilder {
+    #[quickjs(rename = "FnRule", has_refs)]
+    impl JsRule {
         pub fn new<'js>(
+            inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
+            outputs: Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>,
+            function: qjs::Persistent<qjs::Function<'static>>,
             ctx: qjs::Ctx<'js>,
-            build: qjs::Persistent<qjs::Function<'static>>,
+        ) -> Self {
+            Self::new_(
+                function,
+                qjs::Opt(Some(outputs)),
+                qjs::Opt(Some(inputs)),
+                ctx,
+            )
+        }
+
+        #[quickjs(rename = "new")]
+        pub fn new_<'js>(
+            function: qjs::Persistent<qjs::Function<'static>>,
             outputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>>,
             inputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>>,
+            ctx: qjs::Ctx<'js>,
         ) -> Self {
             let context = qjs::Context::from_ctx(ctx).unwrap();
             let inputs = inputs
@@ -236,7 +316,7 @@ mod js {
                     )
                 })
                 .unwrap_or_default();
-            Self::new_raw(inputs, outputs, build, context)
+            Self::new_raw(inputs, outputs, function, context)
         }
 
         #[quickjs(get)]

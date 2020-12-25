@@ -1,5 +1,5 @@
 /* -*- mode: js2 -*- */
-import { FnBuilder, NoBuilder } from "gear";
+import { Rule } from "gear";
 //import { Gcc } from "toolchain";
 
 let src_dir = base.child("src");
@@ -7,11 +7,11 @@ let out_dir = base.child("target");
 let obj_dir = out_dir.child("obj");
 let bin_dir = out_dir;
 
-let build_goal = root.output("build");
+let build_goal = root.goal("build");
 
 function cc(src) {
     let obj = obj_dir.output(src.name.replace(/.c$/, '.o'));
-    FnBuilder(function() {
+    Rule(src, obj, function() {
         console.log("cc");
         for (let input of this.inputs) {
             console.log("input: ", input.path);
@@ -19,13 +19,13 @@ function cc(src) {
         for (let output of this.outputs) {
             console.log("output: ", output.path);
         }
-    }, obj, src);
+    });
     return obj.input;
 }
 
 function ld(name, objs) {
     let bin = bin_dir.output(name);
-    FnBuilder(function() {
+    Rule(objs, bin, function() {
         console.log("ld");
         for (let input of this.inputs) {
             console.log("input: ", input.path);
@@ -33,7 +33,7 @@ function ld(name, objs) {
         for (let output of this.outputs) {
             console.log("output: ", output.path);
         }
-    }, bin, objs);
+    });
     return bin.input;
 }
 
@@ -57,5 +57,5 @@ export default async function() {
 
     let bin = ld("hello", objs); //gcc.link(objs);
 
-    NoBuilder(build_goal).inputs = bin;
+    build_goal.inputs = bin;
 }
