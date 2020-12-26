@@ -1,4 +1,4 @@
-use crate::qjs::{Error as JsError};
+use crate::qjs::Error as JsError;
 use std::{
     error::Error as StdError,
     ffi::NulError,
@@ -44,11 +44,11 @@ impl Display for Error {
 }
 
 macro_rules! from_impls {
-    ($($type:ident => $variant:ident,)*) => {
+    ($($type:ty => $variant:ident $($func:ident)*,)*) => {
         $(
             impl From<$type> for Error {
                 fn from(error: $type) -> Self {
-                    Self::$variant(error)
+                    Self::$variant(error$(.$func())*)
                 }
             }
         )*
@@ -59,14 +59,10 @@ from_impls! {
     IoError => Io,
     NulError => Nul,
     Utf8Error => Utf8,
+    FromUtf8Error => Utf8 utf8_error,
     JsError => Js,
     String => App,
-}
-
-impl From<FromUtf8Error> for Error {
-    fn from(error: FromUtf8Error) -> Self {
-        Self::Utf8(error.utf8_error())
-    }
+    &str => App to_string,
 }
 
 impl From<Error> for JsError {

@@ -7,7 +7,7 @@ let out_dir = base.child("target");
 let obj_dir = out_dir.child("obj");
 let bin_dir = out_dir;
 
-let build_goal = root.goal("build");
+let build_goal = root.goal("build", "Build all binaries");
 
 function cc(src) {
     let obj = obj_dir.output(src.name.replace(/.c$/, '.o'));

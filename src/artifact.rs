@@ -1,4 +1,5 @@
-use crate::{qjs, Mut, Ref, Result, Rule, SystemTime, Weak, WeakElement, WeakKey, WeakSet};
+use crate::system::{access, modified, AccessMode, Path};
+use crate::{qjs, Mut, Ref, Result, Rule, Time, Weak, WeakElement, WeakKey, WeakSet};
 use derive_deref::{Deref, DerefMut};
 use std::{
     borrow::Borrow,
@@ -25,8 +26,9 @@ impl fmt::Display for ArtifactKind {
 
 pub struct Internal {
     name: String,
+    desc: Mut<String>,
     kind: ArtifactKind,
-    time: Mut<SystemTime>,
+    time: Mut<Time>,
     rule: Mut<Option<Rule>>,
 }
 
@@ -152,8 +154,9 @@ where
         Self(
             Ref::new(Internal {
                 name: name.into(),
+                desc: Default::default(),
                 kind: K::KIND,
-                time: Mut::new(SystemTime::UNIX_EPOCH),
+                time: Mut::new(Time::UNIX_EPOCH),
                 rule: Default::default(),
             }),
             PhantomData,
@@ -196,7 +199,15 @@ impl<U, K> Artifact<U, K> {
         &self.0.name
     }
 
-    pub fn time(&self) -> SystemTime {
+    pub fn description(&self) -> String {
+        self.0.desc.read().clone()
+    }
+
+    pub fn set_description(&self, text: impl Into<String>) {
+        *self.0.desc.write() = text.into();
+    }
+
+    pub fn time(&self) -> Time {
         *self.0.time.read()
     }
 
@@ -247,13 +258,56 @@ impl<U, K> Artifact<U, K> {
     pub fn into_kind_any(self) -> Artifact<U, ()> {
         Artifact(self.0, PhantomData)
     }
-}
 
-impl<K> Artifact<Output, K> {
-    pub fn set_time(&self, time: SystemTime) {
+    pub fn is_phony(&self) -> bool {
+        self.0.kind == ArtifactKind::Phony
+    }
+
+    pub fn is_source(&self) -> bool {
+        self.0.rule.read().is_none()
+    }
+
+    pub fn depends(&self) -> Option<Vec<Artifact<Input>>> {
+        self.0.rule.read().as_ref().map(|rule| rule.inputs())
+    }
+
+    pub fn outdated(&self) -> bool {
+        if self.is_phony() {
+            false
+        } else {
+            self.depends()
+                .map(|deps| {
+                    deps.into_iter()
+                        .any(|dep| dep.outdated() || dep.time() > self.time())
+                })
+                .unwrap_or_default()
+        }
+    }
+
+    pub fn set_time(&self, time: Time) {
         *self.0.time.write() = time;
     }
 
+    pub async fn init(self) -> Result<()> {
+        let path = Path::new(self.name());
+        if self.is_source() {
+            if !access(path, AccessMode::READ).await {
+                return Err(format!("Unable to read input file `{}`", self.name()).into());
+            }
+        } else if path.exists().await {
+            if !access(path, AccessMode::WRITE).await {
+                return Err(format!("Unable to write output file `{}`", self.name()).into());
+            }
+        } else {
+            return Ok(());
+        }
+        let time = modified(path).await?;
+        self.set_time(time);
+        Ok(())
+    }
+}
+
+impl<K> Artifact<Output, K> {
     pub fn rule(&self) -> Option<Rule> {
         self.0.rule.read().clone()
     }
@@ -340,10 +394,12 @@ impl<U, K> WeakElement for WeakArtifact<U, K> {
     }
 }
 
+pub type ArtifactWeakSet<K> = WeakSet<WeakArtifact<(), K>>;
+
 #[derive(Default)]
 pub struct StoreInternal {
-    actual: Mut<WeakSet<WeakArtifact<(), Actual>>>,
-    phony: Mut<WeakSet<WeakArtifact<(), Phony>>>,
+    pub actual: Mut<ArtifactWeakSet<Actual>>,
+    pub phony: Mut<ArtifactWeakSet<Phony>>,
 }
 
 #[derive(Default, Clone, Deref)]
@@ -368,6 +424,9 @@ mod js {
 
         #[quickjs(get, hide)]
         pub fn name(&self) -> &String {}
+
+        #[quickjs(get, hide)]
+        pub fn description(&self) -> String {}
     }
 
     pub type GenericOutput = Artifact<Output>;
@@ -378,6 +437,9 @@ mod js {
 
         #[quickjs(get, hide)]
         pub fn name(&self) -> &String {}
+
+        #[quickjs(get, hide)]
+        pub fn description(&self) -> String {}
 
         #[quickjs(get, hide)]
         pub fn rule(&self) -> Option<Rule> {}
@@ -394,6 +456,9 @@ mod js {
 
         #[quickjs(get, hide)]
         pub fn name(&self) -> &String {}
+
+        #[quickjs(get, hide)]
+        pub fn description(&self) -> String {}
     }
 
     pub type ActualOutput = Artifact<Output, Actual>;
@@ -404,6 +469,14 @@ mod js {
 
         #[quickjs(get, hide)]
         pub fn name(&self) -> &String {}
+
+        #[quickjs(get, hide)]
+        pub fn description(&self) -> String {}
+
+        #[quickjs(rename = "description", set)]
+        pub fn set_description_js(&self, text: String) {
+            self.set_description(text)
+        }
 
         #[quickjs(get, hide)]
         pub fn rule(&self) -> Option<Rule> {}
@@ -420,6 +493,9 @@ mod js {
 
         #[quickjs(get, hide)]
         pub fn name(&self) -> &String {}
+
+        #[quickjs(get, hide)]
+        pub fn description(&self) -> String {}
     }
 
     pub type PhonyOutput = Artifact<Output, Phony>;
@@ -430,6 +506,14 @@ mod js {
 
         #[quickjs(get, hide)]
         pub fn name(&self) -> &String {}
+
+        #[quickjs(get, hide)]
+        pub fn description(&self) -> String {}
+
+        #[quickjs(rename = "description", set)]
+        pub fn set_description_js(&self, text: String) {
+            self.set_description(text)
+        }
 
         #[quickjs(get, hide)]
         pub fn rule(&self) -> Option<Rule> {}

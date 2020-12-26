@@ -14,6 +14,8 @@ pub struct Internal {
     artifacts: ArtifactStore,
     scopes: Mut<Set<Scope>>,
     name: String,
+    description: Mut<String>,
+    goals: Mut<Set<Artifact<Output, Phony>>>,
 }
 
 impl Drop for Internal {
@@ -82,7 +84,17 @@ impl Scope {
             artifacts: artifacts.as_ref().clone(),
             scopes: Default::default(),
             name,
+            description: Default::default(),
+            goals: Default::default(),
         }))
+    }
+
+    pub fn scopes(&self) -> Vec<Scope> {
+        self.0.scopes.read().iter().cloned().collect::<Vec<_>>()
+    }
+
+    pub fn goals(&self) -> Vec<Artifact<Output, Phony>> {
+        self.0.goals.read().iter().cloned().collect::<Vec<_>>()
     }
 
     pub fn scope<N: AsRef<str>>(&self, name: N) -> Self {
@@ -104,7 +116,9 @@ impl Scope {
     }
 
     pub fn output<N: AsRef<str>>(&self, name: N) -> Result<Artifact<Output, Phony>> {
-        Artifact::new(self, join_name(self, name))
+        let goal = Artifact::new(self, join_name(self, name))?;
+        self.0.goals.write().insert(goal.clone());
+        Ok(goal)
     }
 }
 
@@ -127,40 +141,69 @@ mod js {
     pub use super::*;
 
     impl Scope {
+        #[doc(hidden)]
         #[quickjs(rename = "new")]
         pub fn ctor() -> Self {
             unimplemented!()
         }
 
         #[quickjs(get)]
-        pub fn name(&self) -> &str {
-            self.0.name.as_ref()
+        pub fn name(&self) -> &String {
+            &self.0.name
         }
 
+        #[quickjs(get)]
+        pub fn description(&self) -> String {
+            self.0.description.read().clone()
+        }
+
+        #[quickjs(skip)]
+        pub fn set_description(&self, text: impl Into<String>) {
+            *self.0.description.write() = text.into();
+        }
+
+        #[doc(hidden)]
+        #[quickjs(rename = "description", set)]
+        pub fn set_description_js(&self, text: String) {
+            self.set_description(text);
+        }
+
+        #[doc(hidden)]
         #[quickjs(rename = "scope")]
-        pub fn scope_js(&self, name: String) -> Self {
-            self.scope(name)
+        pub fn scope_js(&self, name: String, description: qjs::Opt<String>) -> Self {
+            let scope = self.scope(name);
+            if let Some(text) = description.0 {
+                scope.set_description(text);
+            }
+            scope
         }
 
+        #[doc(hidden)]
         #[quickjs(rename = "input")]
         pub fn input_js(&self, name: String) -> Result<Artifact<Input, Phony>> {
             self.input(name)
         }
 
+        #[doc(hidden)]
         #[quickjs(rename = "output")]
         pub fn output_js(&self, name: String) -> Result<Artifact<Output, Phony>> {
             self.output(name)
         }
 
+        #[doc(hidden)]
         #[quickjs(rename = "goal")]
         pub fn goal_fn<'js>(
             &self,
             name: String,
-            ctx: qjs::Ctx<'js>,
             function: qjs::Persistent<qjs::Function<'static>>,
+            description: qjs::Opt<String>,
+            ctx: qjs::Ctx<'js>,
         ) -> Result<Goal<JsRule>> {
             let context = qjs::Context::from_ctx(ctx)?;
             self.output(name).map(|output| {
+                if let Some(text) = description.0 {
+                    output.set_description(text);
+                }
                 Goal(JsRule::new_raw(
                     Default::default(),
                     once(output.into_kind_any()).collect(),
@@ -170,8 +213,23 @@ mod js {
             })
         }
 
-        pub fn goal(&self, name: String) -> Result<Goal<NoRule>> {
+        #[doc(hidden)]
+        #[quickjs(rename = "goal")]
+        pub fn goal_fn2<'js>(
+            &self,
+            name: String,
+            description: qjs::Opt<String>,
+            function: qjs::Persistent<qjs::Function<'static>>,
+            ctx: qjs::Ctx<'js>,
+        ) -> Result<Goal<JsRule>> {
+            self.goal_fn(name, function, description, ctx)
+        }
+
+        pub fn goal(&self, name: String, description: qjs::Opt<String>) -> Result<Goal<NoRule>> {
             self.output(name).map(|output| {
+                if let Some(text) = description.0 {
+                    output.set_description(text);
+                }
                 Goal(NoRule::new_raw(
                     Default::default(),
                     once(output.into_kind_any()).collect(),

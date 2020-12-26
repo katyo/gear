@@ -1,93 +1,135 @@
 mod cmdline;
 
 use async_std::{fs::File, io::ReadExt};
-use gear::{qjs, Result};
-use std::{collections::HashMap, env};
+use cmdline::Args;
+use gear::{qjs, Map, Result, Set};
+use std::env;
 
 #[paw::main]
 #[async_std::main]
-async fn main(args: cmdline::Args) -> Result<()> {
-    log::debug!("Set log level to `{}`", args.log_level);
-    env::set_var("LOG_LEVEL", &args.log_level);
-    pretty_env_logger::init_custom_env("LOG_LEVEL");
+async fn main(args: Args) -> Result<()> {
+    let log = args.get_log();
+    env::set_var("GEAR_LOG", &log);
+    pretty_env_logger::init_custom_env("GEAR_LOG");
+    log::debug!("Set log filter `{}`", log);
 
-    log::debug!("Set current dir to `{}`", args.source_dir.to_str().unwrap());
-    env::set_current_dir(&args.source_dir);
+    log::trace!("{:?}", args);
 
-    let vars = args
-        .input
-        .iter()
-        .map(|item| item.to_pair())
-        .filter(|item| item.is_some())
-        .map(|item| item.unwrap())
-        .collect::<HashMap<_, _>>();
-    log::debug!("Captured vars `{:?}`", vars);
+    log::debug!("Set current dir to `{}`", args.dir.display());
+    env::set_current_dir(&args.dir);
 
-    let goals = args
-        .input
-        .iter()
-        .map(|item| item.to_name())
-        .filter(|item| item.is_some())
-        .map(|item| item.unwrap())
-        .collect::<Vec<_>>();
-    log::debug!("Captured goals `{:?}`", goals);
+    let paths = args.get_paths().collect::<Vec<_>>();
+    let vars = args.get_vars().collect::<Map<_, _>>();
+    let goals = args.get_goals().collect::<Set<_>>();
 
-    let rt = qjs::Runtime::new()?;
-    let ctx = qjs::Context::full(&rt)?;
-
-    rt.set_loader(
-        (
-            qjs::BuiltinResolver::default()
-                .with_module("gear")
-                .with_module("toolchain")
-                .with_module("system"),
-            qjs::FileResolver::default(),
-        ),
-        (
-            qjs::ModuleLoader::default()
-                .with_module(
-                    "gear",
-                    (
-                        gear::DirectoryJs,
-                        gear::ArtifactJs,
-                        gear::ScopeJs,
-                        gear::RuleJs,
-                    ),
-                )
-                .with_module("toolchain", gear::GccJs)
-                .with_module("system", gear::SystemJs),
-            qjs::ScriptLoader::default(),
-        ),
-    );
-
-    rt.spawn_pending_jobs(None);
-
-    ctx.with(|ctx| ctx.globals().init_def::<gear::ConsoleJs>())?;
-
-    let artifacts = gear::ArtifactStore::default();
-    let current_dir = gear::Directory::new(&artifacts, "");
-    let root_scope = gear::Scope::new(&artifacts, "");
-
-    ctx.with(|ctx| -> qjs::Result<()> {
-        let globals = ctx.globals();
-        globals.prop("root", qjs::Accessor::from(move || root_scope.clone()))?;
-        globals.prop("base", qjs::Accessor::from(move || current_dir.clone()))?;
-        Ok(())
+    let file = args.find_file().await.ok_or_else(|| {
+        log::error!("Unable to locate rules file");
+        "Unable to locate rules file"
     })?;
 
-    let rules_name = args.rules_file.to_str().unwrap();
+    let main = Main::new(paths, vars, goals)?;
 
-    log::debug!("Read rules file `{}`", rules_name);
+    main.load_rules(&file).await?;
 
-    let mut file = File::open(&args.rules_file).await?;
-    let mut src = String::new();
-    file.read_to_string(&mut src).await?;
+    if args.completions.is_some() {
+        args.gen_completions();
+    } else if args.print_db {
+        main.print_scope().await?;
+    } else {
+        main.build_rules(args.dry_run).await?;
+        if args.watch {
+            main.watch_inputs(args.dry_run).await?;
+        }
+    }
 
-    let pend = ctx
-        .with(move |ctx| -> qjs::Result<qjs::Promise<()>> {
-            log::debug!("Compile rules file `{}`", rules_name);
+    Ok(())
+}
 
-            let module = qjs::Module::new(ctx, rules_name, src)?.eval()?;
+pub struct Main {
+    vars: Map<String, String>,
+    goals: Set<String>,
+    rt: qjs::Runtime,
+    ctx: qjs::Context,
+    scope: gear::Scope,
+}
+
+impl Main {
+    pub fn new(paths: Vec<String>, vars: Map<String, String>, goals: Set<String>) -> Result<Self> {
+        log::debug!("Modules paths `{:?}`", paths);
+        log::debug!("Captured vars `{:?}`", vars);
+        log::debug!("Captured goals `{:?}`", goals);
+
+        let (rt, ctx) = Self::init_js(paths)?;
+
+        let artifacts = gear::ArtifactStore::default();
+        let scope = gear::Scope::new(&artifacts, "");
+
+        ctx.with({
+            let root = scope.clone();
+            let base = gear::Directory::new(&artifacts, "");
+            move |ctx| -> qjs::Result<_> {
+                let globals = ctx.globals();
+                globals.prop("root", qjs::Accessor::from(move || root.clone()))?;
+                globals.prop("base", qjs::Accessor::from(move || base.clone()))?;
+                Ok(())
+            }
+        })?;
+
+        Ok(Self {
+            vars,
+            goals,
+            rt,
+            ctx,
+            scope,
+        })
+    }
+
+    fn init_js(paths: Vec<String>) -> Result<(qjs::Runtime, qjs::Context)> {
+        let rt = qjs::Runtime::new()?;
+        let ctx = qjs::Context::full(&rt)?;
+
+        rt.set_loader(
+            (
+                qjs::BuiltinResolver::default()
+                    .with_module("gear")
+                    .with_module("toolchain")
+                    .with_module("system"),
+                qjs::FileResolver::default().with_paths(paths),
+            ),
+            (
+                qjs::ModuleLoader::default()
+                    .with_module(
+                        "gear",
+                        (
+                            gear::DirectoryJs,
+                            gear::ArtifactJs,
+                            gear::ScopeJs,
+                            gear::RuleJs,
+                        ),
+                    )
+                    .with_module("toolchain", gear::GccJs)
+                    .with_module("system", gear::SystemJs),
+                qjs::ScriptLoader::default(),
+            ),
+        );
+
+        ctx.with(|ctx| ctx.globals().init_def::<gear::ConsoleJs>())?;
+
+        Ok((rt, ctx))
+    }
+
+    pub async fn load_rules(&self, name: &str) -> Result<()> {
+        log::debug!("Read rules file `{}`", name);
+
+        let mut file = File::open(name).await?;
+        let mut src = String::new();
+        file.read_to_string(&mut src).await?;
+
+        let pend = self.ctx.with(move |ctx| -> qjs::Result<qjs::Promise<()>> {
+            log::debug!("Compile rules file `{}`", name);
+            let module = qjs::Module::new(ctx, name, src)?;
+            log::debug!("Evaluate rules file `{}`", name);
+            let module = module.eval()?;
 
             let default: qjs::Value = module.get("default")?;
 
@@ -97,25 +139,57 @@ async fn main(args: cmdline::Args) -> Result<()> {
                 default
             }
             .get()
-        })
-        .map_err(|error| {
-            log::error!(
-                "Error when evaluating rules file `{}`: {}",
-                rules_name,
-                error
-            );
-            error
         })?;
 
-    if let Err(error) = pend.await {
-        log::error!(
-            "Error when evaluating rules file `{}`: {}",
-            rules_name,
-            error
-        );
-    } else {
-        log::debug!("Success");
+        let handle = self.rt.spawn_pending_jobs(Some(10));
+
+        if let Err(error) = pend.await {
+            log::error!("Error when running rules file `{}`: {}", name, error);
+        } else {
+            log::debug!("Success");
+        }
+
+        handle.await;
+        Ok(())
     }
 
-    Ok(())
+    fn match_goal(&self, name: &str) -> bool {
+        if self.goals.is_empty() {
+            true
+        } else {
+            self.goals.iter().any(|goal| name.starts_with(goal))
+        }
+    }
+
+    fn show_scope(&self, scope: &gear::Scope) {
+        for goal in scope.goals() {
+            if self.match_goal(&goal.name()) {
+                print!("{}", goal.name());
+                let text = goal.description();
+                if text.is_empty() {
+                    println!("");
+                } else {
+                    println!("    {}", text);
+                }
+            }
+        }
+        for scope in self.scope.scopes() {
+            if self.match_goal(&scope.name()) {
+                self.show_scope(&scope);
+            }
+        }
+    }
+
+    pub async fn print_scope(&self) -> Result<()> {
+        self.show_scope(&self.scope);
+        Ok(())
+    }
+
+    pub async fn build_rules(&self, dry_run: bool) -> Result<()> {
+        Ok(())
+    }
+
+    pub async fn watch_inputs(&self, dry_run: bool) -> Result<()> {
+        Ok(())
+    }
 }

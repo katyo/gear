@@ -1,5 +1,6 @@
 use super::Config;
-use crate::{access, exec_out, qjs, which, AccessMode, PathBuf, Ref, Result};
+use crate::system::{access, exec_out, which, AccessMode, PathBuf};
+use crate::{qjs, Ref, Result};
 
 pub(self) struct Internal {
     path: PathBuf,
