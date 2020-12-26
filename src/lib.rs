@@ -8,10 +8,12 @@ mod result;
 mod rule;
 mod scope;
 mod system;
+mod utils;
 //mod variable;
 
 pub use refs::*;
 pub use result::*;
+pub use utils::*;
 
 pub use rquickjs as qjs;
 

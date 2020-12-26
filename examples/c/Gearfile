@@ -7,11 +7,14 @@ let out_dir = base.child("target");
 let obj_dir = out_dir.child("obj");
 let bin_dir = out_dir;
 
-let build_goal = root.goal("build", "Build all binaries");
+let build_all = root.goal("build", "Build all binaries");
+let clean_all = root.goal("clean", "Clean all binaries", async function clean() {
+    console.log("clean!");
+});
 
 function cc(src) {
     let obj = obj_dir.output(src.name.replace(/.c$/, '.o'));
-    Rule(src, obj, function() {
+    Rule(src, obj, async function compile() {
         console.log("cc");
         for (let input of this.inputs) {
             console.log("input: ", input.path);
@@ -25,7 +28,7 @@ function cc(src) {
 
 function ld(name, objs) {
     let bin = bin_dir.output(name);
-    Rule(objs, bin, function() {
+    Rule(objs, bin, async function link() {
         console.log("ld");
         for (let input of this.inputs) {
             console.log("input: ", input.path);
@@ -57,5 +60,5 @@ export default async function() {
 
     let bin = ld("hello", objs); //gcc.link(objs);
 
-    build_goal.inputs = bin;
+    build_all.inputs = bin;
 }

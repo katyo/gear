@@ -1,7 +1,7 @@
 mod cmdline;
 
 use async_std::{fs::File, io::ReadExt};
-use cmdline::Args;
+use cmdline::{Args, Print};
 use gear::{qjs, Map, Result, Set};
 use std::env;
 
@@ -33,8 +33,8 @@ async fn main(args: Args) -> Result<()> {
 
     if args.completions.is_some() {
         args.gen_completions();
-    } else if args.print_db {
-        main.print_scope().await?;
+    } else if let Some(print) = args.get_print() {
+        main.print_db(print).await?;
     } else {
         main.build_rules(args.dry_run).await?;
         if args.watch {
@@ -161,27 +161,23 @@ impl Main {
         }
     }
 
-    fn show_scope(&self, scope: &gear::Scope) {
-        for goal in scope.goals() {
-            if self.match_goal(&goal.name()) {
-                print!("{}", goal.name());
-                let text = goal.description();
-                if text.is_empty() {
-                    println!("");
-                } else {
-                    println!("    {}", text);
-                }
-            }
+    pub async fn print_db(&self, print: Print) -> Result<()> {
+        match print {
+            Print::Goals => print!(
+                "{}",
+                gear::NodeDisplay((&self.scope, &|name: &str| self.match_goal(name)))
+            ),
+            Print::Graph => print!(
+                "{}",
+                gear::NodeDisplay((
+                    {
+                        let store: &gear::ArtifactStore = self.scope.as_ref();
+                        store
+                    },
+                    &|name: &str| self.match_goal(name)
+                ))
+            ),
         }
-        for scope in self.scope.scopes() {
-            if self.match_goal(&scope.name()) {
-                self.show_scope(&scope);
-            }
-        }
-    }
-
-    pub async fn print_scope(&self) -> Result<()> {
-        self.show_scope(&self.scope);
         Ok(())
     }
 

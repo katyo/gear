@@ -2,7 +2,10 @@
 Command-line arguments and command processing
  */
 
-pub(self) use std::path::{Path, PathBuf};
+pub(self) use std::{
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 pub(self) use structopt::StructOpt;
 
 /// Default rules files
@@ -42,6 +45,7 @@ pub struct Args {
     #[structopt(
         short = "I",
         long = "path",
+        alias = "include-dir",
         env = "GEAR_PATH",
         value_delimiter = PATHS_DELIMITER,
         require_delimiter = true
@@ -79,8 +83,14 @@ pub struct Args {
     ///
     /// Prints known goals and variables.
     /// You can use pattern to filter printed data.
-    #[structopt(short = "p", long = "print-db", alias = "print-data-base")]
-    pub print_db: bool,
+    #[structopt(
+        name = "format",
+        short = "p",
+        long = "print-db",
+        alias = "print-data-base",
+        possible_values = PRINT_VALUES,
+    )]
+    pub print_db: Option<Option<Print>>,
 
     /// Do not invoke rules
     ///
@@ -143,6 +153,10 @@ impl Args {
         }
     }
 
+    pub fn get_print(&self) -> Option<Print> {
+        self.print_db.map(|print| print.unwrap_or_default())
+    }
+
     pub fn get_log(&self) -> String {
         self.log.join(",")
     }
@@ -170,13 +184,38 @@ async fn select_file(candidates: &str) -> Option<String> {
     None
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum Print {
+    Goals,
+    Graph,
+}
+
+const PRINT_VALUES: &[&str] = &["plain", "dot"];
+
+impl FromStr for Print {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "graph" | "graphviz" | "dot" => Self::Graph,
+            _ => Self::Goals,
+        })
+    }
+}
+
+impl Default for Print {
+    fn default() -> Self {
+        Self::Goals
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Input {
     Pair(String, String),
     Name(String),
 }
 
-impl std::str::FromStr for Input {
+impl FromStr for Input {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {

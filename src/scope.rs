@@ -6,6 +6,7 @@ use derive_deref::Deref;
 use either::Either;
 use std::{
     borrow::Borrow,
+    fmt::{Display, Formatter, Result as FmtResult},
     hash::{Hash, Hasher},
     iter::once,
 };
@@ -119,6 +120,40 @@ impl Scope {
         let goal = Artifact::new(self, join_name(self, name))?;
         self.0.goals.write().insert(goal.clone());
         Ok(goal)
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.name().is_empty()
+    }
+
+    pub fn fmt_tree<F>(&self, ident: usize, matcher: &F, fmt: &mut Formatter) -> FmtResult
+    where
+        F: Fn(&str) -> bool,
+    {
+        let ident = if self.is_root() {
+            ident
+        } else {
+            let spaces = ident * 4;
+            write!(fmt, "{:ident$}{}", "", self.name(), ident = spaces)?;
+            let text = self.description();
+            if !text.is_empty() {
+                writeln!(fmt, "    {}", text)?;
+            }
+            '\n'.fmt(fmt)?;
+            ident + 1
+        };
+
+        for goal in self.goals() {
+            if matcher(&goal.name()) {
+                goal.fmt_tree(ident, fmt)?;
+            }
+        }
+        for scope in self.scopes() {
+            if matcher(&scope.name()) {
+                scope.fmt_tree(ident, matcher, fmt)?;
+            }
+        }
+        Ok(())
     }
 }
 

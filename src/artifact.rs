@@ -1,10 +1,12 @@
 use crate::system::{access, modified, AccessMode, Path};
-use crate::{qjs, Mut, Ref, Result, Rule, Time, Weak, WeakElement, WeakKey, WeakSet};
+use crate::{qjs, Mut, Ref, Result, Rule, Set, Time, Weak, WeakElement, WeakKey, WeakSet};
 use derive_deref::{Deref, DerefMut};
 use std::{
     borrow::Borrow,
-    fmt,
+    collections::VecDeque,
+    fmt::{Display, Formatter, Result as FmtResult},
     hash::{Hash, Hasher},
+    iter::once,
     marker::PhantomData,
 };
 
@@ -14,8 +16,8 @@ pub enum ArtifactKind {
     Phony,
 }
 
-impl fmt::Display for ArtifactKind {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl Display for ArtifactKind {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match self {
             Self::Actual => "actual",
             Self::Phony => "phony",
@@ -305,6 +307,62 @@ impl<U, K> Artifact<U, K> {
         self.set_time(time);
         Ok(())
     }
+
+    pub fn fmt_tree(&self, ident: usize, f: &mut Formatter) -> FmtResult {
+        let spaces = ident * 4;
+        write!(f, "{:ident$}{}", "", self.name(), ident = spaces)?;
+        let text = self.description();
+        if !text.is_empty() {
+            writeln!(f, "    {}", text)?;
+        }
+        '\n'.fmt(f)?;
+        Ok(())
+    }
+
+    pub fn fmt_dot_edges(&self, ident: usize, f: &mut Formatter) -> FmtResult {
+        if let Some(deps) = self.depends() {
+            if deps.is_empty() {
+                return Ok(());
+            }
+            let spaces = ident * 4;
+            f.write_fmt(format_args!("{:ident$}", "", ident = spaces))?;
+            let multiple = deps.len() > 1;
+            if multiple {
+                '{'.fmt(f)?;
+            }
+            let mut deps = deps.into_iter();
+            f.write_fmt(format_args!("{:?}", deps.next().unwrap().name()))?;
+            for dep in deps {
+                f.write_fmt(format_args!(" {:?}", dep.name()))?;
+            }
+            if multiple {
+                '}'.fmt(f)?;
+            }
+            f.write_fmt(format_args!(" -> {:?}", self.name(),))?;
+            if self.is_phony() {
+                " [style=dashed]".fmt(f)?;
+            }
+            ";\n".fmt(f)?;
+        }
+        Ok(())
+    }
+    pub fn fmt_dot_node(&self, ident: usize, f: &mut Formatter) -> FmtResult {
+        let spaces = ident * 4;
+        f.write_fmt(format_args!(
+            "{:ident$}{:?} [style=filled fillcolor={}];\n",
+            "",
+            self.name(),
+            if self.is_source() {
+                "aquamarine"
+            } else if self.is_phony() {
+                "goldenrod1" //"skyblue"
+            } else {
+                "pink"
+            },
+            ident = spaces,
+        ))?;
+        Ok(())
+    }
 }
 
 impl<K> Artifact<Output, K> {
@@ -404,6 +462,48 @@ pub struct StoreInternal {
 
 #[derive(Default, Clone, Deref)]
 pub struct ArtifactStore(Ref<StoreInternal>);
+
+impl ArtifactStore {
+    pub fn fmt_dot<F>(&self, matcher: F, f: &mut Formatter) -> FmtResult
+    where
+        F: Fn(&str) -> bool,
+    {
+        let mut queue: VecDeque<Vec<Artifact<Input>>> = {
+            once(
+                self.phony
+                    .read()
+                    .iter()
+                    .filter(|artifact| matcher(artifact.name()))
+                    .map(|a| a.into_kind_any().into_usage())
+                    .collect(),
+            )
+            .collect()
+        };
+        let mut shown = Set::<Artifact<Input>>::default();
+
+        "digraph {\n".fmt(f)?;
+        loop {
+            if let Some(artifacts) = queue.pop_front() {
+                for artifact in artifacts {
+                    if !shown.contains(&artifact) {
+                        artifact.fmt_dot_edges(1, f)?;
+                        if let Some(artifacts) = artifact.depends() {
+                            queue.push_back(artifacts);
+                        }
+                        shown.insert(artifact);
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        for artifact in shown {
+            artifact.fmt_dot_node(1, f)?;
+        }
+        "}\n".fmt(f)?;
+        Ok(())
+    }
+}
 
 impl AsRef<ArtifactStore> for ArtifactStore {
     fn as_ref(&self) -> &ArtifactStore {
