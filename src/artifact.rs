@@ -274,16 +274,12 @@ impl<U, K> Artifact<U, K> {
     }
 
     pub fn outdated(&self) -> bool {
-        if self.is_phony() {
-            false
-        } else {
-            self.depends()
-                .map(|deps| {
-                    deps.into_iter()
-                        .any(|dep| dep.outdated() || dep.time() > self.time())
-                })
-                .unwrap_or_default()
-        }
+        self.depends()
+            .map(|deps| {
+                deps.into_iter()
+                    .any(|dep| dep.outdated() || dep.time() > self.time())
+            })
+            .unwrap_or_default()
     }
 
     pub fn set_time(&self, time: Time) {
@@ -355,13 +351,37 @@ impl<U, K> Artifact<U, K> {
             if self.is_source() {
                 "aquamarine"
             } else if self.is_phony() {
-                "goldenrod1" //"skyblue"
+                "goldenrod1"
             } else {
                 "pink"
             },
             ident = spaces,
         ))?;
         Ok(())
+    }
+
+    pub fn process<F>(&self, schedule: &mut F) -> bool
+    where
+        F: FnMut(Rule),
+    {
+        if let Some(depends) = self.depends() {
+            if depends
+                .into_iter()
+                .map(|dependency| dependency.process(schedule) || dependency.time() > self.time())
+                .fold(false, |pre, flag| pre | flag)
+            {
+                if let Some(rule) = &*self.0.rule.read() {
+                    log::trace!("Schedule rule for `{}`", self.name());
+                    schedule(rule.clone());
+                }
+                return true;
+            }
+        }
+        if let Some(rule) = &*self.0.rule.read() {
+            log::trace!("Schedule rule for `{}`", self.name());
+            schedule(rule.clone());
+        }
+        return false;
     }
 }
 

@@ -36,9 +36,10 @@ async fn main(args: Args) -> Result<()> {
     } else if let Some(print) = args.get_print() {
         main.print_db(print).await?;
     } else {
-        main.build_rules(args.dry_run).await?;
+        let jobs = args.get_jobs();
+        main.build_rules(jobs, args.dry_run).await?;
         if args.watch {
-            main.watch_inputs(args.dry_run).await?;
+            main.watch_inputs(jobs, args.dry_run).await?;
         }
     }
 
@@ -181,11 +182,15 @@ impl Main {
         Ok(())
     }
 
-    pub async fn build_rules(&self, dry_run: bool) -> Result<()> {
-        Ok(())
+    pub async fn build_rules(&self, jobs: usize, dry_run: bool) -> Result<()> {
+        let _handle = self.rt.spawn_pending_jobs(None);
+        let store: &gear::ArtifactStore = self.scope.as_ref();
+        store
+            .process(jobs, |name: &str| self.match_goal(name))
+            .await
     }
 
-    pub async fn watch_inputs(&self, dry_run: bool) -> Result<()> {
+    pub async fn watch_inputs(&self, jobs: usize, dry_run: bool) -> Result<()> {
         Ok(())
     }
 }

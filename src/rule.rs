@@ -1,7 +1,14 @@
-use crate::{qjs, AnyKind, Artifact, Input, Mut, Output, Ref, Result, Set, WeakArtifact, WeakSet};
+use crate::{
+    qjs, AnyKind, Artifact, Input, Mut, Output, Ref, Result, Set, Time, WeakArtifact, WeakSet,
+};
 use derive_deref::Deref;
 use either::Either;
-use std::{future::Future, iter::once, pin::Pin};
+use std::{
+    future::Future,
+    hash::{Hash, Hasher},
+    iter::once,
+    pin::Pin,
+};
 
 /// The builder interface
 pub trait RuleApi {
@@ -20,6 +27,36 @@ pub trait RuleApi {
 
 #[derive(Clone, Deref)]
 pub struct Rule(Ref<dyn RuleApi>);
+
+impl PartialEq for Rule {
+    fn eq(&self, other: &Self) -> bool {
+        Ref::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Rule {}
+
+impl Hash for Rule {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Ref::as_ptr(&self.0).hash(state);
+    }
+}
+
+impl Rule {
+    pub fn ready_inputs(&self) -> bool {
+        let inputs = self.0.inputs();
+        inputs.is_empty() || !inputs.into_iter().any(|input| input.outdated())
+    }
+
+    pub async fn process(self) -> Result<()> {
+        self.0.invoke().await?;
+        let time = Time::now();
+        for output in self.0.outputs() {
+            output.set_time(time);
+        }
+        Ok(())
+    }
+}
 
 pub struct NoInternal {
     inputs: Mut<Set<Artifact<Input>>>,

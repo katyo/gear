@@ -7,9 +7,11 @@ let out_dir = base.child("target");
 let obj_dir = out_dir.child("obj");
 let bin_dir = out_dir;
 
-let build_all = root.goal("build", "Build all binaries");
+let build_all = root.goal("build", "Build all binaries", async function build() {
+    console.log("build complete");
+});
 let clean_all = root.goal("clean", "Clean all binaries", async function clean() {
-    console.log("clean!");
+    console.log("clean complete");
 });
 
 function cc(src) {
@@ -17,10 +19,10 @@ function cc(src) {
     Rule(src, obj, async function compile() {
         console.log("cc");
         for (let input of this.inputs) {
-            console.log("input: ", input.path);
+            console.log("input: ", input.name);
         }
         for (let output of this.outputs) {
-            console.log("output: ", output.path);
+            console.log("output: ", output.name);
         }
     });
     return obj.input;
@@ -31,10 +33,10 @@ function ld(name, objs) {
     Rule(objs, bin, async function link() {
         console.log("ld");
         for (let input of this.inputs) {
-            console.log("input: ", input.path);
+            console.log("input: ", input.name);
         }
         for (let output of this.outputs) {
-            console.log("output: ", output.path);
+            console.log("output: ", output.name);
         }
     });
     return bin.input;

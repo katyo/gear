@@ -76,8 +76,12 @@ pub struct Args {
     pub log: Vec<String>,
 
     /// Generate completions
-    #[structopt(name = "shell",long = "completions", possible_values = &structopt::clap::Shell::variants())]
+    #[structopt(name = "shell", long = "completions", possible_values = &structopt::clap::Shell::variants())]
     pub completions: Option<structopt::clap::Shell>,
+
+    /// Number of jobs nurs simultaneously
+    #[structopt(name = "jobs", short = "j", long = "jobs")]
+    pub jobs: Option<usize>,
 
     /// Print database
     ///
@@ -151,6 +155,10 @@ impl Args {
         if let Some(shell) = self.completions {
             Self::clap().gen_completions_to(env!("CARGO_PKG_NAME"), shell, &mut std::io::stdout());
         }
+    }
+
+    pub fn get_jobs(&self) -> usize {
+        self.jobs.unwrap_or_else(|| num_cpus::get())
     }
 
     pub fn get_print(&self) -> Option<Print> {
