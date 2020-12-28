@@ -1,5 +1,7 @@
 use crate::{
-    qjs, AnyKind, Artifact, Input, Mut, Output, Ref, Result, Set, Time, WeakArtifact, WeakSet,
+    qjs,
+    system::{create_dir_all, Path},
+    AnyKind, Artifact, Input, Mut, Output, Ref, Result, Set, Time, WeakArtifact, WeakSet,
 };
 use derive_deref::Deref;
 use either::Either;
@@ -49,6 +51,13 @@ impl Rule {
     }
 
     pub async fn process(self) -> Result<()> {
+        for output in self.0.outputs() {
+            if let Some(dir) = Path::new(output.name()).parent() {
+                if !dir.is_dir().await {
+                    create_dir_all(dir).await?;
+                }
+            }
+        }
         self.0.invoke().await?;
         let time = Time::now();
         for output in self.0.outputs() {

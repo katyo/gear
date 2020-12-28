@@ -1,42 +1,65 @@
 /* -*- mode: js2 -*- */
 import { Rule } from "gear";
+import { exec } from "system";
 //import { Gcc } from "toolchain";
 
 let src_dir = base.child("src");
-let out_dir = base.child("target");
+let inc_dir = base.child("include");
+let out_dir = dest.child("debug");
 let obj_dir = out_dir.child("obj");
 let bin_dir = out_dir;
 
+let build = root.scope("build");
 let build_all = root.goal("build", "Build all binaries", async function build() {
     console.log("build complete");
 });
+let clean = root.scope("clean");
 let clean_all = root.goal("clean", "Clean all binaries", async function clean() {
     console.log("clean complete");
 });
 
 function cc(src) {
-    let obj = obj_dir.output(src.name.replace(/.c$/, '.o'));
+    let obj = obj_dir.output(src.name + '.o');
     Rule(src, obj, async function compile() {
-        console.log("cc");
-        for (let input of this.inputs) {
-            console.log("input: ", input.name);
+        let src = this.inputs[0].name;
+        let obj = this.outputs[0].name;
+        console.log(`cc ${obj} < ${src}`);
+        let {status, output, error} = await exec({
+            cmd: "gcc",
+            args: ["-I", inc_dir.path, "-c", "-o", obj, src],
+        });
+        if (output) {
+            console.warn(`cc output: ${output}`);
         }
-        for (let output of this.outputs) {
-            console.log("output: ", output.name);
+        if (error) {
+            console.error(`cc error: ${error}`);
+        }
+        if (status && status != 0) {
+            throw new Error(`Error when compiling ${src} Status: ${status}`);
         }
     });
     return obj.input;
 }
 
+// Linker
 function ld(name, objs) {
     let bin = bin_dir.output(name);
     Rule(objs, bin, async function link() {
-        console.log("ld");
-        for (let input of this.inputs) {
-            console.log("input: ", input.name);
+        let objs = this.inputs.map(obj => obj.name);
+        let bin = this.outputs[0].name;
+        console.log(`ld ${bin} < ${objs.join(" ")}`);
+        let {status, output, error} = await exec({
+            cmd: "gcc",
+            args: ["-o", bin, ...objs],
+        });
+        if (output) {
+            console.warn(`cc output: ${output}`);
         }
-        for (let output of this.outputs) {
-            console.log("output: ", output.name);
+        if (error) {
+            console.error(`cc error: ${error}`);
+        }
+        if (status && status != 0) {
+            throw new Error(`Error when linking ${src} Status: ${status}`);
         }
     });
     return bin.input;
@@ -52,15 +75,30 @@ export default async function() {
 
     console.log(await gcc.search_dirs);*/
 
-    let srcs = [
+    let lib_srcs = [
         "hello.c",
         "bye.c",
+    ].map((src) => src_dir.input(src));
+
+    let bin_srcs = [
         "main.c"
     ].map((src) => src_dir.input(src));
 
-    let objs = srcs.map(cc); // srcs.map((src) => gcc.compile(src));
+    let lib_objs = lib_srcs.map(cc);
+    let bin_objs = bin_srcs.map(cc);
 
-    let bin = ld("hello", objs); //gcc.link(objs);
+    let lib = ld("libhello.a", lib_objs);
+    let bin = ld("hello", [...lib_objs, ...bin_objs]);
 
-    build_all.inputs = bin;
+    let build_bin = build.goal("bin", "Build main binary");
+    build_bin.inputs = bin;
+
+    let build_lib = build.goal("lib", "Build main binary");
+    build_lib.inputs = lib;
+
+    let clean_bin = clean.goal("bin", "Clean main binary");
+    let clean_lib = clean.goal("lib", "Clean main binary");
+
+    build_all.inputs = [build_lib.input, build_bin.input];
+    clean_all.inputs = [clean_lib.input, clean_bin.input];
 }

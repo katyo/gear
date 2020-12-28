@@ -1,5 +1,8 @@
 mod cmdline;
 
+#[cfg(feature = "watch")]
+mod watcher;
+
 use async_std::{fs::File, io::ReadExt};
 use cmdline::{Args, Print};
 use gear::{qjs, Map, Result, Set};
@@ -15,19 +18,30 @@ async fn main(args: Args) -> Result<()> {
 
     log::trace!("{:?}", args);
 
-    log::debug!("Set current dir to `{}`", args.dir.display());
-    env::set_current_dir(&args.dir);
+    //log::debug!("Set current dir to `{}`", args.dir.display());
+    //env::set_current_dir(&args.dir);
 
     let paths = args.get_paths().collect::<Vec<_>>();
+    log::debug!("Modules paths `{:?}`", paths);
+
     let vars = args.get_vars().collect::<Map<_, _>>();
+    log::debug!("Captured vars `{:?}`", vars);
+
     let goals = args.get_goals().collect::<Set<_>>();
+    log::debug!("Captured goals `{:?}`", goals);
+
+    let base = args.get_base();
+    log::debug!("Base directory `{}`", base);
+
+    let dest = args.get_dest();
+    log::debug!("Dest directory `{}`", dest);
 
     let file = args.find_file().await.ok_or_else(|| {
         log::error!("Unable to locate rules file");
         "Unable to locate rules file"
     })?;
 
-    let main = Main::new(paths, vars, goals)?;
+    let main = Main::new(paths, vars, goals, base, dest)?;
 
     main.load_rules(&file).await?;
 
@@ -38,6 +52,8 @@ async fn main(args: Args) -> Result<()> {
     } else {
         let jobs = args.get_jobs();
         main.build_rules(jobs, args.dry_run).await?;
+
+        #[cfg(feature = "watch")]
         if args.watch {
             main.watch_inputs(jobs, args.dry_run).await?;
         }
@@ -49,17 +65,20 @@ async fn main(args: Args) -> Result<()> {
 pub struct Main {
     vars: Map<String, String>,
     goals: Set<String>,
+    base: String,
     rt: qjs::Runtime,
     ctx: qjs::Context,
     scope: gear::Scope,
 }
 
 impl Main {
-    pub fn new(paths: Vec<String>, vars: Map<String, String>, goals: Set<String>) -> Result<Self> {
-        log::debug!("Modules paths `{:?}`", paths);
-        log::debug!("Captured vars `{:?}`", vars);
-        log::debug!("Captured goals `{:?}`", goals);
-
+    pub fn new(
+        paths: Vec<String>,
+        vars: Map<String, String>,
+        goals: Set<String>,
+        base: String,
+        dest: String,
+    ) -> Result<Self> {
         let (rt, ctx) = Self::init_js(paths)?;
 
         let artifacts = gear::ArtifactStore::default();
@@ -67,11 +86,13 @@ impl Main {
 
         ctx.with({
             let root = scope.clone();
-            let base = gear::Directory::new(&artifacts, "");
+            let base = gear::Directory::new(&artifacts, &base);
+            let dest = gear::Directory::new(&artifacts, dest);
             move |ctx| -> qjs::Result<_> {
                 let globals = ctx.globals();
                 globals.prop("root", qjs::Accessor::from(move || root.clone()))?;
                 globals.prop("base", qjs::Accessor::from(move || base.clone()))?;
+                globals.prop("dest", qjs::Accessor::from(move || dest.clone()))?;
                 Ok(())
             }
         })?;
@@ -79,6 +100,7 @@ impl Main {
         Ok(Self {
             vars,
             goals,
+            base,
             rt,
             ctx,
             scope,
@@ -183,6 +205,7 @@ impl Main {
     }
 
     pub async fn build_rules(&self, jobs: usize, dry_run: bool) -> Result<()> {
+        log::debug!("Build goals: {:?}", self.goals);
         let _handle = self.rt.spawn_pending_jobs(None);
         let store: &gear::ArtifactStore = self.scope.as_ref();
         store
@@ -190,7 +213,54 @@ impl Main {
             .await
     }
 
+    #[cfg(feature = "watch")]
     pub async fn watch_inputs(&self, jobs: usize, dry_run: bool) -> Result<()> {
+        use futures::StreamExt;
+        use gear::system::Path;
+
+        let (mut watcher, mut events) = watcher::Watcher::new()?;
+
+        let base = Path::new(if self.base.is_empty() {
+            "."
+        } else {
+            &self.base
+        })
+        .canonicalize()
+        .await?;
+
+        log::debug!("Watch directory `{}` for updates", base.display());
+        watcher.watch(&base, true)?;
+
+        loop {
+            match events.next().await {
+                Some(Ok(entries)) => {
+                    let store: &gear::ArtifactStore = self.scope.as_ref();
+                    match store
+                        .update_sources(entries.iter().filter_map(|(path, time)| {
+                            path.strip_prefix(&base)
+                                .ok()
+                                .and_then(|path| path.to_str())
+                                .map(|name| (name, Some(*time)))
+                        }))
+                        .await
+                    {
+                        Ok(true) => self.build_rules(jobs, dry_run).await?,
+                        Err(error) => {
+                            log::error!("Errot then updating sources: {}", error);
+                        }
+                        _ => (),
+                    }
+                }
+                Some(Err(error)) => {
+                    log::error!("Watch error: {}", error);
+                    break;
+                }
+                _ => (),
+            }
+        }
+
+        watcher.unwatch(&base)?;
+
         Ok(())
     }
 }

@@ -2,18 +2,12 @@ use crate::{Artifact, ArtifactStore, Output, Result, Rule, Set, Time};
 use futures::future;
 use std::collections::VecDeque;
 
-/*#[cfg(not(feature = "parallel"))]
-use async_std::task::spawn_local as spawn_task;
-
-#[cfg(feature = "parallel")]
-use async_std::task::spawn as spawn_task;*/
-
 impl ArtifactStore {
     async fn process_artifacts<K, I: Iterator<Item = Artifact<(), K>>>(
         &self,
         jobs: usize,
         artifacts: I,
-    ) {
+    ) -> Result<()> {
         let mut queue = VecDeque::new();
         let mut schedule = |rule: Rule| queue.push_back(rule);
         for artifact in artifacts {
@@ -43,11 +37,7 @@ impl ArtifactStore {
                 None
             })
             .collect::<Vec<_>>();
-        if opt_pending.is_empty() {
-            log::debug!("No pending rules");
-            return;
-        }
-        loop {
+        while !opt_pending.is_empty() {
             log::trace!("Rules {} queued {} pending", queue.len(), opt_pending.len());
             let (result, _, mut pending) = future::select_all(opt_pending).await;
             if let Err(error) = result {
@@ -70,10 +60,14 @@ impl ArtifactStore {
                     }
                 }
             }
-            if queue.is_empty() && pending.is_empty() {
-                break;
-            }
             opt_pending = pending;
+        }
+
+        if queue.is_empty() {
+            Ok(())
+        } else {
+            log::warn!("Rules {} queued", queue.len());
+            Err(format!("Cannot be built").into())
         }
     }
 
@@ -94,10 +88,37 @@ impl ArtifactStore {
                 .iter()
                 .filter(|artifact| matcher(artifact.name())),
         )
-        .await;
+        .await?;
 
         log::debug!("Done");
         Ok(())
+    }
+
+    pub async fn update_source(&self, name: &str, time: Option<Time>) -> Result<bool> {
+        if let Some(artifact) = self.actual.read().get(name) {
+            if artifact.is_source() {
+                let updated = artifact.update_time(time).await;
+                log::trace!("Updated source {}", name);
+                return updated;
+            }
+        }
+        Ok(false)
+    }
+
+    pub async fn update_sources(
+        &self,
+        entries: impl IntoIterator<Item = (&str, Option<Time>)>,
+    ) -> Result<bool> {
+        future::join_all(
+            entries
+                .into_iter()
+                .map(|(name, time)| self.update_source(name, time)),
+        )
+        .await
+        .into_iter()
+        .fold(Ok(false), |pre, cur| {
+            pre.and_then(|pre_res| cur.map(|cur_res| pre_res || cur_res))
+        })
     }
 
     fn remove_expired(&self) {

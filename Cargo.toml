@@ -71,8 +71,13 @@ features = ["attributes", "unstable"]
 [dependencies.async-process]
 version = "^1"
 
-[dependencies.async-fsw]
-version = "^0.2"
+[dependencies.async-ctrlc]
+version = "^1"
+optional = true
+
+[dependencies.notify]
+version = "5.0.0-pre.4"
+optional = true
 
 [dependencies.rquickjs]
 #version = "^0"
@@ -83,5 +88,9 @@ default-features = false
 features = ["exports", "loader", "either", "indexmap", "classes", "properties", "async-std", "macro"]
 
 [features]
-#default = ["parallel"]
-parallel = []
+default = [
+  #"parallel"
+  "watch",
+]
+parallel = ["rquickjs/parallel"]
+watch = ["notify"]

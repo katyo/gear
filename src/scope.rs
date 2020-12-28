@@ -100,16 +100,15 @@ impl Scope {
 
     pub fn scope<N: AsRef<str>>(&self, name: N) -> Self {
         let name = name.as_ref();
-        self.0
-            .scopes
-            .read()
-            .get(name)
-            .map(|scope| scope.clone())
-            .unwrap_or_else(|| {
-                let scope = Self::new(self, join_name(self, name));
-                self.0.scopes.write().insert(scope.clone());
-                scope
-            })
+        {
+            if let Some(scope) = self.0.scopes.read().get(name) {
+                return scope.clone();
+            }
+        }
+
+        let scope = Self::new(self, join_name(self, name));
+        self.0.scopes.write().insert(scope.clone());
+        scope
     }
 
     pub fn input<N: AsRef<str>>(&self, name: N) -> Result<Artifact<Input, Phony>> {

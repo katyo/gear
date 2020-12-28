@@ -4,11 +4,6 @@ use std::cell::RefCell;
 #[cfg(feature = "parallel")]
 use std::sync::{Arc as Ref, RwLock as RefCell, Weak};
 
-pub use weak_table::{
-    traits::{WeakElement, WeakKey},
-    WeakHashSet as WeakSet,
-};
-
 #[cfg(not(feature = "parallel"))]
 pub use std::{
     cell::{Ref as ReadRef, RefMut as WriteRef},

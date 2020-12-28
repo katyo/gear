@@ -1,12 +1,14 @@
 use crate::system::{access, modified, AccessMode, Path};
 use crate::{qjs, Mut, Ref, Result, Rule, Set, Time, Weak, WeakElement, WeakKey, WeakSet};
 use derive_deref::{Deref, DerefMut};
+use either::{Left, Right};
 use std::{
     borrow::Borrow,
     collections::VecDeque,
+    fmt,
     fmt::{Display, Formatter, Result as FmtResult},
     hash::{Hash, Hasher},
-    iter::once,
+    iter::{empty, once},
     marker::PhantomData,
 };
 
@@ -63,7 +65,6 @@ impl Eq for Internal {}
 impl Hash for Internal {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);
-        self.kind.hash(state);
     }
 }
 
@@ -112,6 +113,28 @@ impl IsArtifactKind for Phony {
 
 #[repr(transparent)]
 pub struct Artifact<U = (), K = ()>(Ref<Internal>, PhantomData<(U, K)>);
+
+impl<U, K> Display for Artifact<U, K> {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        write!(
+            f,
+            "Artifact(`{}`, {}, {})",
+            self.0.name,
+            self.0.kind,
+            if self.is_source() {
+                "source"
+            } else {
+                "product"
+            }
+        )
+    }
+}
+
+impl<U, K> fmt::Debug for Artifact<U, K> {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        Display::fmt(self, f)
+    }
+}
 
 impl<U, K> Clone for Artifact<U, K> {
     fn clone(&self) -> Self {
@@ -269,17 +292,22 @@ impl<U, K> Artifact<U, K> {
         self.0.rule.read().is_none()
     }
 
-    pub fn depends(&self) -> Option<Vec<Artifact<Input>>> {
-        self.0.rule.read().as_ref().map(|rule| rule.inputs())
+    pub fn inputs(&self) -> impl Iterator<Item = Artifact<Input>> {
+        self.0
+            .rule
+            .read()
+            .as_ref()
+            .map(|rule| Right(rule.inputs().into_iter()))
+            .unwrap_or(Left(empty()))
     }
 
     pub fn outdated(&self) -> bool {
-        self.depends()
-            .map(|deps| {
-                deps.into_iter()
-                    .any(|dep| dep.outdated() || dep.time() > self.time())
-            })
-            .unwrap_or_default()
+        if self.is_source() {
+            false
+        } else {
+            self.inputs()
+                .any(|dep| dep.outdated() || dep.time() > self.time())
+        }
     }
 
     pub fn set_time(&self, time: Time) {
@@ -304,6 +332,16 @@ impl<U, K> Artifact<U, K> {
         Ok(())
     }
 
+    pub async fn update_time(&self, new_time: Option<Time>) -> Result<bool> {
+        let cur_time = modified(Path::new(self.name())).await?;
+        Ok(if cur_time > self.time() {
+            self.set_time(new_time.unwrap_or(cur_time));
+            true
+        } else {
+            false
+        })
+    }
+
     pub fn fmt_tree(&self, ident: usize, f: &mut Formatter) -> FmtResult {
         let spaces = ident * 4;
         write!(f, "{:ident$}{}", "", self.name(), ident = spaces)?;
@@ -315,30 +353,36 @@ impl<U, K> Artifact<U, K> {
         Ok(())
     }
 
+    fn fmt_node_name(&self, f: &mut Formatter) -> FmtResult {
+        f.write_fmt(format_args!("{:?}", self.name()))
+    }
+
     pub fn fmt_dot_edges(&self, ident: usize, f: &mut Formatter) -> FmtResult {
-        if let Some(deps) = self.depends() {
-            if deps.is_empty() {
-                return Ok(());
+        if !self.is_source() {
+            let mut deps = self.inputs();
+            if let Some(dep1) = deps.next() {
+                let spaces = ident * 4;
+                f.write_fmt(format_args!("{:ident$}", "", ident = spaces))?;
+                if let Some(dep2) = deps.next() {
+                    '{'.fmt(f)?;
+                    dep1.fmt_node_name(f)?;
+                    ' '.fmt(f)?;
+                    dep2.fmt_node_name(f)?;
+                    for dep in deps {
+                        ' '.fmt(f)?;
+                        dep.fmt_node_name(f)?;
+                    }
+                    '}'.fmt(f)?;
+                } else {
+                    dep1.fmt_node_name(f)?;
+                }
+                " -> ".fmt(f)?;
+                self.fmt_node_name(f)?;
+                if self.is_phony() {
+                    " [style=dashed]".fmt(f)?;
+                }
+                ";\n".fmt(f)?;
             }
-            let spaces = ident * 4;
-            f.write_fmt(format_args!("{:ident$}", "", ident = spaces))?;
-            let multiple = deps.len() > 1;
-            if multiple {
-                '{'.fmt(f)?;
-            }
-            let mut deps = deps.into_iter();
-            f.write_fmt(format_args!("{:?}", deps.next().unwrap().name()))?;
-            for dep in deps {
-                f.write_fmt(format_args!(" {:?}", dep.name()))?;
-            }
-            if multiple {
-                '}'.fmt(f)?;
-            }
-            f.write_fmt(format_args!(" -> {:?}", self.name(),))?;
-            if self.is_phony() {
-                " [style=dashed]".fmt(f)?;
-            }
-            ";\n".fmt(f)?;
         }
         Ok(())
     }
@@ -364,24 +408,25 @@ impl<U, K> Artifact<U, K> {
     where
         F: FnMut(Rule),
     {
-        if let Some(depends) = self.depends() {
-            if depends
-                .into_iter()
-                .map(|dependency| dependency.process(schedule) || dependency.time() > self.time())
-                .fold(false, |pre, flag| pre | flag)
-            {
-                if let Some(rule) = &*self.0.rule.read() {
-                    log::trace!("Schedule rule for `{}`", self.name());
-                    schedule(rule.clone());
-                }
-                return true;
-            }
+        if self.is_source() {
+            false
+        } else if self
+            .inputs()
+            .map(|dep| dep.process(schedule) || dep.time() > self.time())
+            .fold(self.is_phony(), |pre, flag| pre || flag)
+        {
+            self.schedule_rule(schedule);
+            true
+        } else {
+            false
         }
+    }
+
+    fn schedule_rule<F: FnMut(Rule)>(&self, schedule: &mut F) {
         if let Some(rule) = &*self.0.rule.read() {
             log::trace!("Schedule rule for `{}`", self.name());
             schedule(rule.clone());
         }
-        return false;
     }
 }
 
@@ -507,8 +552,9 @@ impl ArtifactStore {
                 for artifact in artifacts {
                     if !shown.contains(&artifact) {
                         artifact.fmt_dot_edges(1, f)?;
-                        if let Some(artifacts) = artifact.depends() {
-                            queue.push_back(artifacts);
+                        let deps = artifact.inputs().collect::<Vec<_>>();
+                        if !deps.is_empty() {
+                            queue.push_back(deps);
                         }
                         shown.insert(artifact);
                     }

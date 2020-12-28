@@ -7,7 +7,7 @@ mod refs;
 mod result;
 mod rule;
 mod scope;
-mod system;
+pub mod system;
 mod utils;
 //mod variable;
 
@@ -27,8 +27,7 @@ pub use directory::Directory;
 pub use rule::{JsRule, NoRule, Rule, RuleApi};
 pub use scope::Scope;
 
-pub type Set<T> = indexmap::IndexSet<T, fxhash::FxBuildHasher>;
-pub type Map<K, V> = indexmap::IndexMap<K, V, fxhash::FxBuildHasher>;
+pub use weak_table::traits::{WeakElement, WeakKey};
 
 pub use artifact::Js as ArtifactJs;
 pub use directory::Js as DirectoryJs;
@@ -36,3 +35,11 @@ pub use rule::Js as RuleJs;
 pub use scope::Js as ScopeJs;
 
 pub use compiler::GccJs;
+
+use fxhash::FxBuildHasher;
+use indexmap::{IndexMap, IndexSet};
+use weak_table::WeakHashSet;
+
+pub type Set<T> = IndexSet<T, FxBuildHasher>;
+pub type Map<K, V> = IndexMap<K, V, FxBuildHasher>;
+pub type WeakSet<T> = WeakHashSet<T, FxBuildHasher>;

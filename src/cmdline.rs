@@ -2,11 +2,9 @@
 Command-line arguments and command processing
  */
 
-pub(self) use std::{
-    path::{Path, PathBuf},
-    str::FromStr,
-};
-pub(self) use structopt::StructOpt;
+use gear::system::{Path, PathBuf};
+use std::str::FromStr;
+use structopt::StructOpt;
 
 /// Default rules files
 const RULES_FILES: &str = "Gearfile, Gearfile.js, Gear.js";
@@ -52,15 +50,24 @@ pub struct Args {
     )]
     pub paths: Vec<PathBuf>,
 
-    /// Current directory
+    /// Base source directory
     #[structopt(
         short = "C",
-        long = "dir",
+        long = "base",
         alias = "directory",
-        env = "GEAR_DIR",
-        default_value = "."
+        env = "GEAR_BASE",
+        default_value = ""
     )]
-    pub dir: PathBuf,
+    pub base: PathBuf,
+
+    /// Destination directory
+    #[structopt(
+        short = "O",
+        long = "dest",
+        env = "GEAR_DEST",
+        default_value = "target"
+    )]
+    pub dest: PathBuf,
 
     /// Logging filter
     ///
@@ -70,7 +77,7 @@ pub struct Args {
         short = "l",
         long = "log",
         env = "GEAR_LOG",
-        default_value = "warn",
+        default_value = "info",
         require_delimiter = true
     )]
     pub log: Vec<String>,
@@ -105,6 +112,7 @@ pub struct Args {
     /// Watch mode
     ///
     /// In this mode goals will be updated when updating dependencies.
+    #[cfg(feature = "watch")]
     #[structopt(short = "w", long = "watch")]
     pub watch: bool,
 
@@ -119,36 +127,24 @@ pub struct Args {
 }
 
 impl Args {
-    pub fn get_file(&self) -> Option<&PathBuf> {
-        if self.file == Path::new(RULES_FILES) {
-            None
+    pub fn get_base(&self) -> String {
+        self.base.display().to_string()
+    }
+
+    pub fn get_dest(&self) -> String {
+        if self.dest.is_relative() {
+            self.base.join(&self.dest).display().to_string()
         } else {
-            Some(&self.file)
+            self.base.display().to_string()
         }
     }
 
     pub async fn find_file(&self) -> Option<String> {
-        if let Some(file) = self.get_file() {
-            Some(file.display().to_string())
-        } else {
-            select_file(RULES_FILES).await
-        }
-    }
-
-    pub fn get_config(&self) -> Option<&PathBuf> {
-        if self.config == Path::new(CONFIG_FILES) {
-            None
-        } else {
-            Some(&self.config)
-        }
+        self.file_select(&self.file, RULES_FILES).await
     }
 
     pub async fn find_config(&self) -> Option<String> {
-        if let Some(file) = self.get_config() {
-            Some(file.display().to_string())
-        } else {
-            select_file(CONFIG_FILES).await
-        }
+        self.file_select(&self.config, CONFIG_FILES).await
     }
 
     pub fn gen_completions(&self) {
@@ -180,16 +176,23 @@ impl Args {
     pub fn get_goals<'i>(&'i self) -> impl Iterator<Item = String> + 'i {
         self.input.iter().filter_map(|item| item.to_name())
     }
-}
 
-async fn select_file(candidates: &str) -> Option<String> {
-    for candidate in candidates.split(", ") {
-        let path = async_std::path::Path::new(candidate);
-        if path.is_file().await {
-            return Some(candidate.to_string());
+    async fn file_select(&self, path: &Path, candidates: &str) -> Option<String> {
+        if path != Path::new(candidates) {
+            return Some(if path.is_absolute() {
+                path.display().to_string()
+            } else {
+                self.base.join(path).display().to_string()
+            });
         }
+        for candidate in candidates.split(", ") {
+            let path = self.base.join(candidate);
+            if path.is_file().await {
+                return Some(candidate.to_string());
+            }
+        }
+        None
     }
-    None
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -81,3 +81,27 @@ impl From<Error> for JsError {
         }
     }
 }
+
+#[cfg(feature = "watch")]
+impl From<notify::Error> for Error {
+    fn from(error: notify::Error) -> Self {
+        use notify::ErrorKind::*;
+        match error.kind {
+            Generic(error) => Self::App(format!("Notifier error: {}", error)),
+            Io(error) => Self::Io(error),
+            PathNotFound => Self::App(format!(
+                "Notifier path does not exist: {}",
+                error
+                    .paths
+                    .into_iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )),
+            WatchNotFound => Self::App("Notifier watch does not exist.".into()),
+            InvalidConfig(config) => {
+                Self::App(format!("Notifier config is not a valid: {:?}", config))
+            }
+        }
+    }
+}
