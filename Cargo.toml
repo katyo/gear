@@ -68,9 +68,6 @@ version = "^0.3"
 version = "^1"
 features = ["attributes", "unstable"]
 
-[dependencies.async-process]
-version = "^1"
-
 [dependencies.async-ctrlc]
 version = "^1"
 optional = true

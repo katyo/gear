@@ -5,7 +5,7 @@ mod watcher;
 
 use async_std::{fs::File, io::ReadExt};
 use cmdline::{Args, Print};
-use gear::{qjs, Map, Result, Set};
+use gear::{qjs, Map, Ref, Result, Set};
 use std::env;
 
 #[paw::main]
@@ -17,9 +17,6 @@ async fn main(args: Args) -> Result<()> {
     log::debug!("Set log filter `{}`", log);
 
     log::trace!("{:?}", args);
-
-    //log::debug!("Set current dir to `{}`", args.dir.display());
-    //env::set_current_dir(&args.dir);
 
     let paths = args.get_paths().collect::<Vec<_>>();
     log::debug!("Modules paths `{:?}`", paths);
@@ -41,53 +38,72 @@ async fn main(args: Args) -> Result<()> {
         "Unable to locate rules file"
     })?;
 
-    let main = Main::new(paths, vars, goals, base, dest)?;
+    let props = Ref::new(Props {
+        file,
+        paths,
+        vars,
+        goals,
+        base,
+        dest,
+    });
 
-    main.load_rules(&file).await?;
+    loop {
+        let main = Main::new(props.clone())?;
 
-    if args.completions.is_some() {
-        args.gen_completions();
-    } else if let Some(print) = args.get_print() {
-        main.print_db(print).await?;
-    } else {
-        let jobs = args.get_jobs();
-        main.build_rules(jobs, args.dry_run).await?;
+        main.load_rules().await?;
 
-        #[cfg(feature = "watch")]
-        if args.watch {
-            main.watch_inputs(jobs, args.dry_run).await?;
+        if args.completions.is_some() {
+            args.gen_completions();
+        } else if let Some(print) = args.get_print() {
+            main.print_db(print).await?;
+        } else {
+            let jobs = args.get_jobs();
+            main.init_rules(jobs).await?;
+            main.build_rules(jobs, args.dry_run).await?;
+
+            #[cfg(feature = "watch")]
+            if args.watch {
+                if main.watch_inputs(jobs, args.dry_run).await? {
+                    log::debug!("Reloading rules");
+                    continue;
+                }
+            }
         }
+
+        break;
     }
 
     Ok(())
 }
 
-pub struct Main {
+pub struct Props {
+    file: String,
+    paths: Vec<String>,
     vars: Map<String, String>,
     goals: Set<String>,
     base: String,
+    dest: String,
+}
+
+pub struct Main {
+    props: Ref<Props>,
     rt: qjs::Runtime,
     ctx: qjs::Context,
+    compile: qjs::Compile,
     scope: gear::Scope,
 }
 
 impl Main {
-    pub fn new(
-        paths: Vec<String>,
-        vars: Map<String, String>,
-        goals: Set<String>,
-        base: String,
-        dest: String,
-    ) -> Result<Self> {
-        let (rt, ctx) = Self::init_js(paths)?;
+    pub fn new(props: Ref<Props>) -> Result<Self> {
+        let (rt, ctx, compile) = Self::init_js(&props.paths)?;
 
         let artifacts = gear::ArtifactStore::default();
         let scope = gear::Scope::new(&artifacts, "");
 
         ctx.with({
             let root = scope.clone();
-            let base = gear::Directory::new(&artifacts, &base);
-            let dest = gear::Directory::new(&artifacts, dest);
+            let base = gear::Directory::new(&artifacts, &props.base);
+            let dest = gear::Directory::new(&artifacts, &props.dest);
             move |ctx| -> qjs::Result<_> {
                 let globals = ctx.globals();
                 globals.prop("root", qjs::Accessor::from(move || root.clone()))?;
@@ -98,18 +114,21 @@ impl Main {
         })?;
 
         Ok(Self {
-            vars,
-            goals,
-            base,
+            props,
             rt,
             ctx,
+            compile,
             scope,
         })
     }
 
-    fn init_js(paths: Vec<String>) -> Result<(qjs::Runtime, qjs::Context)> {
+    fn init_js<P: AsRef<str>>(paths: &[P]) -> Result<(qjs::Runtime, qjs::Context, qjs::Compile)> {
         let rt = qjs::Runtime::new()?;
         let ctx = qjs::Context::full(&rt)?;
+
+        rt.spawn_executor::<qjs::AsyncStd>();
+
+        let compile = qjs::Compile::new();
 
         rt.set_loader(
             (
@@ -117,7 +136,7 @@ impl Main {
                     .with_module("gear")
                     .with_module("toolchain")
                     .with_module("system"),
-                qjs::FileResolver::default().with_paths(paths),
+                compile.resolver(qjs::FileResolver::default().with_paths(paths)),
             ),
             (
                 qjs::ModuleLoader::default()
@@ -138,10 +157,11 @@ impl Main {
 
         ctx.with(|ctx| ctx.globals().init_def::<gear::ConsoleJs>())?;
 
-        Ok((rt, ctx))
+        Ok((rt, ctx, compile))
     }
 
-    pub async fn load_rules(&self, name: &str) -> Result<()> {
+    pub async fn load_rules(&self) -> Result<()> {
+        let name = self.props.file.as_str();
         log::debug!("Read rules file `{}`", name);
 
         let mut file = File::open(name).await?;
@@ -164,23 +184,21 @@ impl Main {
             .get()
         })?;
 
-        let handle = self.rt.spawn_pending_jobs(Some(10));
-
         if let Err(error) = pend.await {
             log::error!("Error when running rules file `{}`: {}", name, error);
         } else {
             log::debug!("Success");
         }
 
-        handle.await;
+        self.rt.idle().await;
         Ok(())
     }
 
     fn match_goal(&self, name: &str) -> bool {
-        if self.goals.is_empty() {
+        if self.props.goals.is_empty() {
             true
         } else {
-            self.goals.iter().any(|goal| name.starts_with(goal))
+            self.props.goals.iter().any(|goal| name.starts_with(goal))
         }
     }
 
@@ -204,26 +222,29 @@ impl Main {
         Ok(())
     }
 
-    pub async fn build_rules(&self, jobs: usize, dry_run: bool) -> Result<()> {
-        log::debug!("Build goals: {:?}", self.goals);
-        let _handle = self.rt.spawn_pending_jobs(None);
+    pub async fn init_rules(&self, _jobs: usize) -> Result<()> {
+        log::debug!("Init goals: {:?}", self.props.goals);
         let store: &gear::ArtifactStore = self.scope.as_ref();
-        store
-            .process(jobs, |name: &str| self.match_goal(name))
-            .await
+        store.prepare().await
+    }
+
+    pub async fn build_rules(&self, jobs: usize, dry_run: bool) -> Result<()> {
+        log::debug!("Build goals: {:?}", self.props.goals);
+        let store: &gear::ArtifactStore = self.scope.as_ref();
+        store.process(&self.props.goals, jobs, dry_run).await
     }
 
     #[cfg(feature = "watch")]
-    pub async fn watch_inputs(&self, jobs: usize, dry_run: bool) -> Result<()> {
+    pub async fn watch_inputs(&self, jobs: usize, dry_run: bool) -> Result<bool> {
         use futures::StreamExt;
         use gear::system::Path;
 
         let (mut watcher, mut events) = watcher::Watcher::new()?;
 
-        let base = Path::new(if self.base.is_empty() {
+        let base = Path::new(if self.props.base.is_empty() {
             "."
         } else {
-            &self.base
+            &self.props.base
         })
         .canonicalize()
         .await?;
@@ -231,19 +252,57 @@ impl Main {
         log::debug!("Watch directory `{}` for updates", base.display());
         watcher.watch(&base, true)?;
 
+        let modules = gear::Ref::new(
+            futures::future::join_all(
+                self.compile
+                    .modules()
+                    .into_iter()
+                    .map(|(_name, path)| path)
+                    .chain(std::iter::once(self.props.file.as_str()))
+                    .map(|path| async move {
+                        let path = path.to_string();
+                        let time = gear::system::modified(&Path::new(&path)).await?;
+                        Ok((path, time))
+                    }),
+            )
+            .await
+            .into_iter()
+            .collect::<Result<Map<_, _>>>()?,
+        );
+
+        log::trace!("Watch rules files: {:?}", modules);
+
         loop {
             match events.next().await {
                 Some(Ok(entries)) => {
-                    let store: &gear::ArtifactStore = self.scope.as_ref();
-                    match store
-                        .update_sources(entries.iter().filter_map(|(path, time)| {
+                    let paths = entries
+                        .iter()
+                        .filter_map(|(path, time)| {
                             path.strip_prefix(&base)
                                 .ok()
                                 .and_then(|path| path.to_str())
                                 .map(|name| (name, Some(*time)))
-                        }))
-                        .await
-                    {
+                        })
+                        .collect::<Vec<_>>();
+
+                    log::trace!("Touched paths: {:?}", paths);
+
+                    for (path, _time) in paths.iter() {
+                        if let Some(old_time) = modules.get(*path) {
+                            if let Ok(new_time) = gear::system::modified(&Path::new(path)).await {
+                                if new_time > *old_time {
+                                    // Rules modified so need reload
+                                    return Ok(true);
+                                }
+                            } else {
+                                // Rules file removed so need reload
+                                return Ok(true);
+                            }
+                        }
+                    }
+
+                    let store: &gear::ArtifactStore = self.scope.as_ref();
+                    match store.update_sources(paths).await {
                         Ok(true) => self.build_rules(jobs, dry_run).await?,
                         Err(error) => {
                             log::error!("Errot then updating sources: {}", error);
@@ -261,6 +320,6 @@ impl Main {
 
         watcher.unwatch(&base)?;
 
-        Ok(())
+        Ok(false)
     }
 }

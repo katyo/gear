@@ -132,11 +132,7 @@ impl Args {
     }
 
     pub fn get_dest(&self) -> String {
-        if self.dest.is_relative() {
-            self.base.join(&self.dest).display().to_string()
-        } else {
-            self.base.display().to_string()
-        }
+        self.dest.display().to_string()
     }
 
     pub async fn find_file(&self) -> Option<String> {
@@ -179,11 +175,7 @@ impl Args {
 
     async fn file_select(&self, path: &Path, candidates: &str) -> Option<String> {
         if path != Path::new(candidates) {
-            return Some(if path.is_absolute() {
-                path.display().to_string()
-            } else {
-                self.base.join(path).display().to_string()
-            });
+            return path.to_str().map(String::from);
         }
         for candidate in candidates.split(", ") {
             let path = self.base.join(candidate);

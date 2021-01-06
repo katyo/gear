@@ -42,6 +42,33 @@ mod js {
         path.is_dir().await
     }
 
+    pub async fn exists(path: String) -> bool {
+        let path = Path::new(&path);
+        path.exists().await
+    }
+
+    pub async fn remove(path: String) -> qjs::Result<bool> {
+        let path = Path::new(&path);
+        Ok(
+            if let Some(meta) = path.metadata().await.map(Some).or_else(|error| {
+                if matches!(error.kind(), std::io::ErrorKind::NotFound) {
+                    Ok(None)
+                } else {
+                    Err(error)
+                }
+            })? {
+                if meta.is_file() {
+                    async_std::fs::remove_file(path).await?
+                } else {
+                    async_std::fs::remove_dir_all(path).await?
+                }
+                true
+            } else {
+                false
+            },
+        )
+    }
+
     pub async fn exec(input: ExecArg) -> qjs::Result<ExecRes> {
         let mut cmd = Command::new(input.cmd);
         if let Some(args) = input.args {

@@ -5,13 +5,24 @@ use std::collections::VecDeque;
 impl ArtifactStore {
     async fn process_artifacts<K, I: Iterator<Item = Artifact<(), K>>>(
         &self,
-        jobs: usize,
         artifacts: I,
+        jobs: usize,
+        dry_run: bool,
     ) -> Result<()> {
         let mut queue = VecDeque::new();
-        let mut schedule = |rule: Rule| queue.push_back(rule);
+        let mut unique = Set::default();
+        let mut schedule = |rule: Rule| {
+            let id = rule.unique_id();
+            if !unique.contains(&id) {
+                unique.insert(id);
+                queue.push_back(rule);
+            }
+        };
         for artifact in artifacts {
             artifact.process(&mut schedule);
+        }
+        if dry_run {
+            return Ok(());
         }
         log::trace!("Prepare pending");
         let mut opt_pending = (0..jobs)
@@ -71,22 +82,29 @@ impl ArtifactStore {
         }
     }
 
-    pub async fn process<F>(&self, jobs: usize, matcher: F) -> Result<()>
-    where
-        F: Fn(&str) -> bool,
-    {
+    pub async fn prepare(&self) -> Result<()> {
         self.remove_expired();
 
         log::debug!("Init artifacts");
         self.init_artifacts().await?;
 
+        self.remove_expired();
+        Ok(())
+    }
+
+    pub async fn process<S: AsRef<str>>(
+        &self,
+        goals: impl IntoIterator<Item = S>,
+        jobs: usize,
+        dry_run: bool,
+    ) -> Result<()> {
         log::debug!("Process artifacts");
         self.process_artifacts(
+            goals
+                .into_iter()
+                .filter_map(|name| self.phony.read().get(name.as_ref())),
             jobs,
-            self.phony
-                .read()
-                .iter()
-                .filter(|artifact| matcher(artifact.name())),
+            dry_run,
         )
         .await?;
 

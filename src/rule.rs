@@ -45,6 +45,10 @@ impl Hash for Rule {
 }
 
 impl Rule {
+    pub fn unique_id(&self) -> usize {
+        Ref::as_ptr(&self.0) as *const () as usize
+    }
+
     pub fn ready_inputs(&self) -> bool {
         let inputs = self.0.inputs();
         inputs.is_empty() || !inputs.into_iter().any(|input| input.outdated())

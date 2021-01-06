@@ -1,8 +1,8 @@
-pub use async_process::{Command, Stdio};
 pub use async_std::{
     fs::create_dir_all,
     path::{Path, PathBuf},
     prelude::*,
+    process::{Command, Stdio},
 };
 pub use relative_path::*;
 pub use rquickjs as qjs;
