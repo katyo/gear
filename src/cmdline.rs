@@ -116,6 +116,14 @@ pub struct Args {
     #[structopt(short = "w", long = "watch")]
     pub watch: bool,
 
+    /// WebUI URL
+    ///
+    /// Start HTTP API and Web-based UI under this URL.
+    /// Both TCP and Unix Domain sockets supported.
+    #[cfg(feature = "webui")]
+    #[structopt(short = "b", long = "webui")]
+    pub webui: Option<tide::http::Url>,
+
     /// Targets and variables
     ///
     /// You can pass goals to build via command line as `goal1 goal2 ...`.

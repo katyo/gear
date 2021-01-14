@@ -73,6 +73,12 @@ impl Hash for Scope {
     }
 }
 
+impl Default for Scope {
+    fn default() -> Self {
+        Scope::new(&ArtifactStore::default(), "")
+    }
+}
+
 impl Scope {
     pub fn new<A, N>(artifacts: A, name: N) -> Self
     where
@@ -88,6 +94,12 @@ impl Scope {
             description: Default::default(),
             goals: Default::default(),
         }))
+    }
+
+    pub fn reset(&self) {
+        self.0.artifacts.reset();
+        *self.0.scopes.write() = Default::default();
+        *self.0.goals.write() = Default::default();
     }
 
     pub fn scopes(&self) -> Vec<Scope> {

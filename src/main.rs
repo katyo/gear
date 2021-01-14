@@ -3,7 +3,14 @@ mod cmdline;
 #[cfg(feature = "watch")]
 mod watcher;
 
-use async_std::{fs::File, io::ReadExt};
+#[cfg(feature = "webui")]
+mod server;
+
+use async_std::{
+    channel::{unbounded, Receiver, Sender},
+    fs::File,
+    io::ReadExt,
+};
 use cmdline::{Args, Print};
 use gear::{qjs, Map, Ref, Result, Set};
 use std::env;
@@ -38,45 +45,74 @@ async fn main(args: Args) -> Result<()> {
         "Unable to locate rules file"
     })?;
 
-    let props = Ref::new(Props {
+    let props = Props {
         file,
         paths,
         vars,
         goals,
         base,
         dest,
-    });
+    };
 
-    loop {
-        let main = Main::new(props.clone())?;
-
-        main.load_rules().await?;
-
-        if args.completions.is_some() {
-            args.gen_completions();
-        } else if let Some(print) = args.get_print() {
-            main.print_db(print).await?;
-        } else {
-            let jobs = args.get_jobs();
-            main.init_rules(jobs).await?;
-            main.build_rules(jobs, args.dry_run).await?;
-
-            #[cfg(feature = "watch")]
-            if args.watch {
-                if main.watch_inputs(jobs, args.dry_run).await? {
-                    log::debug!("Reloading rules");
-                    continue;
-                }
-            }
-        }
-
-        break;
-    }
+    Main::run(props, args).await?;
 
     Ok(())
 }
 
-pub struct Props {
+struct Main;
+
+impl Main {
+    async fn run(props: Props, args: Args) -> Result<()> {
+        let props = Ref::new(props);
+        let scope = gear::Scope::default();
+        let (sender, receiver) = unbounded();
+
+        #[cfg(feature = "webui")]
+        if let Some(url) = &args.webui {
+            server::Server::new(receiver, scope.clone()).spawn(url);
+        }
+
+        loop {
+            let state = State::new(props.clone(), scope.clone(), sender.clone())?;
+
+            state.load_rules().await?;
+
+            if args.completions.is_some() {
+                args.gen_completions();
+            } else if let Some(print) = args.get_print() {
+                state.print_db(print).await?;
+            } else {
+                if let Err(error) = state.sender.send(Event::RulesUpdate).await {
+                    log::error!("Unable to send rules update event due to: {}", error);
+                }
+
+                let jobs = args.get_jobs();
+                state.init_rules(jobs).await?;
+                state.build_rules(jobs, args.dry_run).await?;
+
+                #[cfg(feature = "watch")]
+                if args.watch {
+                    if state.watch_inputs(jobs, args.dry_run).await? {
+                        log::debug!("Reloading rules");
+                        continue;
+                    }
+                }
+            }
+
+            break;
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub enum Event {
+    RulesUpdate,
+    RuleStateChange(gear::RuleStateChange),
+}
+
+struct Props {
     file: String,
     paths: Vec<String>,
     vars: Map<String, String>,
@@ -85,25 +121,23 @@ pub struct Props {
     dest: String,
 }
 
-pub struct Main {
+struct State {
     props: Ref<Props>,
+    sender: Sender<Event>,
     rt: qjs::Runtime,
     ctx: qjs::Context,
     compile: qjs::Compile,
     scope: gear::Scope,
 }
 
-impl Main {
-    pub fn new(props: Ref<Props>) -> Result<Self> {
+impl State {
+    pub fn new(props: Ref<Props>, scope: gear::Scope, sender: Sender<Event>) -> Result<Self> {
         let (rt, ctx, compile) = Self::init_js(&props.paths)?;
-
-        let artifacts = gear::ArtifactStore::default();
-        let scope = gear::Scope::new(&artifacts, "");
 
         ctx.with({
             let root = scope.clone();
-            let base = gear::Directory::new(&artifacts, &props.base);
-            let dest = gear::Directory::new(&artifacts, &props.dest);
+            let base = gear::Directory::new(&scope, &props.base);
+            let dest = gear::Directory::new(&scope, &props.dest);
             move |ctx| -> qjs::Result<_> {
                 let globals = ctx.globals();
                 globals.prop("root", qjs::Accessor::from(move || root.clone()))?;
@@ -115,6 +149,7 @@ impl Main {
 
         Ok(Self {
             props,
+            sender,
             rt,
             ctx,
             compile,
@@ -161,6 +196,8 @@ impl Main {
     }
 
     pub async fn load_rules(&self) -> Result<()> {
+        self.scope.reset();
+
         let name = self.props.file.as_str();
         log::debug!("Read rules file `{}`", name);
 
@@ -231,7 +268,17 @@ impl Main {
     pub async fn build_rules(&self, jobs: usize, dry_run: bool) -> Result<()> {
         log::debug!("Build goals: {:?}", self.props.goals);
         let store: &gear::ArtifactStore = self.scope.as_ref();
-        store.process(&self.props.goals, jobs, dry_run).await
+        let sender = self.sender.clone();
+        store
+            .process(&self.props.goals, jobs, dry_run, move |event| {
+                let sender = sender.clone();
+                async move {
+                    if let Err(error) = sender.send(Event::RuleStateChange(event)).await {
+                        log::error!("Unable to send rule state change event due to: {}", error);
+                    }
+                }
+            })
+            .await
     }
 
     #[cfg(feature = "watch")]

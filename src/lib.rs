@@ -24,7 +24,8 @@ pub use std::time::{Duration, SystemTime as Time};
 
 pub use artifact::{Actual, AnyKind, Artifact, ArtifactStore, Input, Output, Phony, WeakArtifact};
 pub use directory::Directory;
-pub use rule::{JsRule, NoRule, Rule, RuleApi};
+pub use processor::RuleStateChange;
+pub use rule::{JsRule, NoRule, Rule, RuleApi, RuleId, RuleState};
 pub use scope::Scope;
 
 pub use weak_table::traits::{WeakElement, WeakKey};

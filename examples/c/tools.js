@@ -1,5 +1,5 @@
 import { Rule } from "gear";
-import { exec } from "system";
+import { exec, sleep } from "system";
 
 export default function({obj_dir, lib_dir, inc_dir, bin_dir}) {
     function cc(src) {
@@ -8,6 +8,7 @@ export default function({obj_dir, lib_dir, inc_dir, bin_dir}) {
             let src = this.inputs[0].name;
             let obj = this.outputs[0].name;
             console.log(`cc ${obj} < ${src}`);
+            await sleep(500); // artifical delay
             let {status, output, error} = await exec({
                 cmd: "gcc",
                 args: ["-I", inc_dir.path, "-c", "-o", obj, src],
@@ -32,6 +33,7 @@ export default function({obj_dir, lib_dir, inc_dir, bin_dir}) {
             let objs = this.inputs.map(obj => obj.name);
             let lib = this.outputs[0].name;
             console.log(`ar ${lib} < ${objs.join(" ")}`);
+            await sleep(700); // artifical delay
             let {status, output, error} = await exec({
                 cmd: "gcc-ar",
                 args: ["cr", lib, ...objs],
@@ -57,6 +59,7 @@ export default function({obj_dir, lib_dir, inc_dir, bin_dir}) {
             let objs = this.inputs.map(obj => obj.name);
             let bin = this.outputs[0].name;
             console.log(`ld ${bin} < ${objs.join(" ")}`);
+            await sleep(1000); // artifical delay
             let {status, output, error} = await exec({
                 cmd: "gcc",
                 args: ["-o", bin, ...objs, ...libs_flags],

@@ -2,7 +2,7 @@
 use std::cell::RefCell;
 
 #[cfg(feature = "parallel")]
-use std::sync::{Arc as Ref, RwLock as RefCell, Weak};
+use std::sync::RwLock as RefCell;
 
 #[cfg(not(feature = "parallel"))]
 pub use std::{

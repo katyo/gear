@@ -1,5 +1,7 @@
 use crate::system::{access, modified, AccessMode, Path};
-use crate::{qjs, Mut, Ref, Result, Rule, Set, Time, Weak, WeakElement, WeakKey, WeakSet};
+use crate::{
+    qjs, Mut, Ref, Result, Rule, RuleState, Set, Time, Weak, WeakElement, WeakKey, WeakSet,
+};
 use derive_deref::{Deref, DerefMut};
 use either::{Left, Right};
 use std::{
@@ -301,6 +303,11 @@ impl<U, K> Artifact<U, K> {
             .unwrap_or(Left(empty()))
     }
 
+    pub fn state(&self) -> RuleState {
+        let rule = self.0.rule.read();
+        rule.as_ref().map(|rule| rule.state()).unwrap_or_default()
+    }
+
     pub fn outdated(&self) -> bool {
         if self.is_source() {
             false
@@ -422,6 +429,10 @@ impl<U, K> Artifact<U, K> {
         }
     }
 
+    pub fn get_rule(&self) -> Option<Rule> {
+        self.0.rule.read().clone()
+    }
+
     fn schedule_rule<F: FnMut(Rule)>(&self, schedule: &mut F) {
         if let Some(rule) = &*self.0.rule.read() {
             log::trace!("Schedule rule for `{}`", self.name());
@@ -529,6 +540,11 @@ pub struct StoreInternal {
 pub struct ArtifactStore(Ref<StoreInternal>);
 
 impl ArtifactStore {
+    pub fn reset(&self) {
+        *self.0.actual.write() = Default::default();
+        *self.0.phony.write() = Default::default();
+    }
+
     pub fn fmt_dot<F>(&self, matcher: F, f: &mut Formatter) -> FmtResult
     where
         F: Fn(&str) -> bool,

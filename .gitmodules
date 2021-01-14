@@ -1,0 +1,3 @@
+[submodule "web/src/graphre"]
+	path = web/src/graphre
+	url = https://github.com/katyo/graphre

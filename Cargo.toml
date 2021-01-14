@@ -34,11 +34,15 @@ version = "^0.4"
 version = "^1"
 features = ["derive"]
 
+[dependencies.serde_json]
+version = "^1"
+
 [dependencies.either]
 version = "^1"
 
 [dependencies.indexmap]
 version = "^1"
+features = ["serde"]
 
 [dependencies.fxhash]
 version = "^0.2"
@@ -64,9 +68,31 @@ version = "^1"
 [dependencies.futures]
 version = "^0.3"
 
+#[dependencies.base64]
+#version = "^0.13"
+
+[dependencies.rand]
+version = "^0.8"
+
+[target.'cfg(unix)'.dependencies.nix]
+version = "^0.19"
+optional = true
+
 [dependencies.async-std]
 version = "^1"
 features = ["attributes", "unstable"]
+
+[dependencies.tide]
+version = "^0.15"
+default-features = false
+features = ["h1-server"]
+optional = true
+
+[dependencies.surf]
+version = "^2"
+default-features = false
+features = ["h1-client"]
+optional = true
 
 [dependencies.async-ctrlc]
 version = "^1"
@@ -86,8 +112,25 @@ features = ["exports", "loader", "either", "indexmap", "classes", "properties", 
 
 [features]
 default = [
-  #"parallel"
+  "parallel",
+  "fifo",
   "watch",
+  "webui",
+  #"http-client",
 ]
 parallel = ["rquickjs/parallel"]
 watch = ["notify"]
+webui = ["tide"]
+http-client = ["surf"]
+fifo = ["nix"]
+
+[profile.release]
+opt-level = 3
+debug = false
+rpath = false
+lto = true
+debug-assertions = false
+codegen-units = 1
+panic = 'unwind'
+incremental = false
+overflow-checks = false

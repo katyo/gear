@@ -5,15 +5,47 @@ use crate::{
 };
 use derive_deref::Deref;
 use either::Either;
+use serde::Serialize;
 use std::{
+    fmt::{Display, Formatter, Result as FmtResult},
     future::Future,
     hash::{Hash, Hasher},
     iter::once,
     pin::Pin,
 };
 
+/// The unique identifier of rule
+pub type RuleId = u64;
+
+/// The rule processing state
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[repr(u32)]
+pub enum RuleState {
+    Processed,
+    Scheduled,
+    Processing,
+}
+
+impl Default for RuleState {
+    fn default() -> Self {
+        Self::Processed
+    }
+}
+
+impl Display for RuleState {
+    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
+        match self {
+            RuleState::Processed => "processed",
+            RuleState::Scheduled => "scheduled",
+            RuleState::Processing => "processing",
+        }
+        .fmt(fmt)
+    }
+}
+
 /// The builder interface
-pub trait RuleApi {
+pub trait RuleApi: Send + Sync {
     //// Get the list of values
     //fn values(&self) -> Vec<Ref<Value>>;
 
@@ -27,12 +59,16 @@ pub trait RuleApi {
     fn invoke(&self) -> Pin<Box<dyn Future<Output = Result<()>>>>;
 }
 
-#[derive(Clone, Deref)]
-pub struct Rule(Ref<dyn RuleApi>);
+#[derive(Clone)]
+pub struct Rule {
+    id: RuleId,
+    state: Ref<Mut<RuleState>>,
+    api: Ref<dyn RuleApi>,
+}
 
 impl PartialEq for Rule {
     fn eq(&self, other: &Self) -> bool {
-        Ref::ptr_eq(&self.0, &other.0)
+        self.id == other.id
     }
 }
 
@@ -40,32 +76,57 @@ impl Eq for Rule {}
 
 impl Hash for Rule {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        Ref::as_ptr(&self.0).hash(state);
+        self.id.hash(state);
     }
 }
 
 impl Rule {
-    pub fn unique_id(&self) -> usize {
-        Ref::as_ptr(&self.0) as *const () as usize
+    pub fn from_api(api: Ref<dyn RuleApi>) -> Self {
+        let mut hasher = fxhash::FxHasher::default();
+        for output in api.outputs() {
+            output.hash(&mut hasher);
+        }
+        let id = hasher.finish();
+        let state = Ref::new(Mut::new(RuleState::default()));
+
+        Self { id, api, state }
+    }
+
+    pub fn id(&self) -> RuleId {
+        self.id
+    }
+
+    pub fn state(&self) -> RuleState {
+        *self.state.read()
     }
 
     pub fn ready_inputs(&self) -> bool {
-        let inputs = self.0.inputs();
+        let inputs = self.api.inputs();
         inputs.is_empty() || !inputs.into_iter().any(|input| input.outdated())
     }
 
-    pub async fn process(self) -> Result<()> {
-        for output in self.0.outputs() {
+    pub fn schedule(&self) {
+        *self.state.write() = RuleState::Scheduled;
+    }
+
+    pub async fn process(&self) -> Result<()> {
+        {
+            *self.state.write() = RuleState::Processing;
+        }
+        for output in self.api.outputs() {
             if let Some(dir) = Path::new(output.name()).parent() {
                 if !dir.is_dir().await {
                     create_dir_all(dir).await?;
                 }
             }
         }
-        self.0.invoke().await?;
+        self.api.invoke().await?;
         let time = Time::now();
-        for output in self.0.outputs() {
+        for output in self.api.outputs() {
             output.set_time(time);
+        }
+        {
+            *self.state.write() = RuleState::Processed;
         }
         Ok(())
     }
@@ -88,7 +149,7 @@ pub struct NoRule(Ref<NoInternal>);
 
 impl NoRule {
     fn to_dyn(&self) -> Rule {
-        Rule(Ref::new(self.0.clone()))
+        Rule::from_api(self.0.clone())
     }
 
     pub fn new_raw(inputs: Set<Artifact<Input>>, outputs: WeakSet<WeakArtifact<Output>>) -> Self {
@@ -105,7 +166,7 @@ impl NoRule {
     }
 }
 
-impl RuleApi for Ref<NoInternal> {
+impl RuleApi for NoInternal {
     fn inputs(&self) -> Vec<Artifact<Input>> {
         self.inputs.read().iter().cloned().collect()
     }
@@ -128,6 +189,9 @@ pub struct JsInternal {
     context: qjs::Context,
 }
 
+unsafe impl Send for JsInternal {}
+unsafe impl Sync for JsInternal {}
+
 impl Drop for JsInternal {
     fn drop(&mut self) {
         log::debug!("JsRule::drop");
@@ -140,7 +204,7 @@ pub struct JsRule(#[quickjs(has_refs)] Ref<JsInternal>);
 
 impl JsRule {
     fn to_dyn(&self) -> Rule {
-        Rule(Ref::new(self.0.clone()))
+        Rule::from_api(Ref::new(self.0.clone()))
     }
 
     pub fn new_raw(
@@ -201,12 +265,12 @@ mod js {
 
         #[quickjs(get)]
         pub fn inputs(&self) -> Vec<Artifact<Input>> {
-            self.0.inputs()
+            self.api.inputs()
         }
 
         #[quickjs(get)]
         pub fn outputs(&self) -> Vec<Artifact<Output>> {
-            self.0.outputs()
+            self.api.outputs()
         }
     }
 
