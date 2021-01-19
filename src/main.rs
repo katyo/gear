@@ -7,7 +7,7 @@ mod watcher;
 mod server;
 
 use async_std::{
-    channel::{unbounded, Receiver, Sender},
+    channel::{unbounded, Sender},
     fs::File,
     io::ReadExt,
 };
@@ -45,16 +45,30 @@ async fn main(args: Args) -> Result<()> {
         "Unable to locate rules file"
     })?;
 
+    let values = match args.find_config().await {
+        Some(path) => {
+            log::debug!("Load config file `{}`", path);
+            let mut values = gear::ValueStore::new(path)?;
+            values.load().await?;
+            values
+        }
+        None => {
+            log::warn!("Unable to locate config file. Use defaults.");
+            gear::ValueStore::new(args.default_config())?
+        }
+    };
+    let config = values.path().display().to_string();
+
     let props = Props {
         file,
+        config,
         paths,
-        vars,
         goals,
         base,
         dest,
     };
 
-    Main::run(props, args).await?;
+    Main::run(props, values, args).await?;
 
     Ok(())
 }
@@ -62,9 +76,12 @@ async fn main(args: Args) -> Result<()> {
 struct Main;
 
 impl Main {
-    async fn run(props: Props, args: Args) -> Result<()> {
+    async fn run(props: Props, values: gear::ValueStore, args: Args) -> Result<()> {
         let props = Ref::new(props);
-        let scope = gear::Scope::default();
+        let variables = gear::VariableStore::new(values, args.get_vars());
+        let artifacts = gear::ArtifactStore::default();
+        let store = gear::Store::new(variables, artifacts);
+        let scope = gear::Scope::new_root(store);
         let (sender, receiver) = unbounded();
 
         #[cfg(feature = "webui")]
@@ -114,11 +131,27 @@ pub enum Event {
 
 struct Props {
     file: String,
+    config: String,
     paths: Vec<String>,
-    vars: Map<String, String>,
     goals: Set<String>,
     base: String,
     dest: String,
+}
+
+#[derive(qjs::IntoJs)]
+struct Environ {
+    pub root: gear::Scope,
+    pub base: gear::Directory,
+    pub dest: gear::Directory,
+}
+
+impl Environ {
+    fn new(state: &State) -> Self {
+        let root = state.scope.clone();
+        let base = gear::Directory::new(&root, &state.props.base);
+        let dest = gear::Directory::new(&root, &state.props.dest);
+        Self { root, base, dest }
+    }
 }
 
 struct State {
@@ -133,19 +166,6 @@ struct State {
 impl State {
     pub fn new(props: Ref<Props>, scope: gear::Scope, sender: Sender<Event>) -> Result<Self> {
         let (rt, ctx, compile) = Self::init_js(&props.paths)?;
-
-        ctx.with({
-            let root = scope.clone();
-            let base = gear::Directory::new(&scope, &props.base);
-            let dest = gear::Directory::new(&scope, &props.dest);
-            move |ctx| -> qjs::Result<_> {
-                let globals = ctx.globals();
-                globals.prop("root", qjs::Accessor::from(move || root.clone()))?;
-                globals.prop("base", qjs::Accessor::from(move || base.clone()))?;
-                globals.prop("dest", qjs::Accessor::from(move || dest.clone()))?;
-                Ok(())
-            }
-        })?;
 
         Ok(Self {
             props,
@@ -178,6 +198,7 @@ impl State {
                     .with_module(
                         "gear",
                         (
+                            gear::VariableJs,
                             gear::DirectoryJs,
                             gear::ArtifactJs,
                             gear::ScopeJs,
@@ -214,7 +235,7 @@ impl State {
             let default: qjs::Value = module.get("default")?;
 
             if default.is_function() {
-                default.as_function().unwrap().call(())?
+                default.as_function().unwrap().call((Environ::new(self),))?
             } else {
                 default
             }
@@ -305,7 +326,8 @@ impl State {
                     .modules()
                     .into_iter()
                     .map(|(_name, path)| path)
-                    .chain(std::iter::once(self.props.file.as_str()))
+                    .chain(Some(self.props.file.as_str()))
+                    .chain(Some(self.props.config.as_str()))
                     .map(|path| async move {
                         let path = path.to_string();
                         let time = gear::system::modified(&Path::new(&path)).await?;

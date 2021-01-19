@@ -7,9 +7,10 @@ mod refs;
 mod result;
 mod rule;
 mod scope;
+mod store;
 pub mod system;
 mod utils;
-//mod variable;
+mod variable;
 
 pub use refs::*;
 pub use result::*;
@@ -27,6 +28,11 @@ pub use directory::Directory;
 pub use processor::RuleStateChange;
 pub use rule::{JsRule, NoRule, Rule, RuleApi, RuleId, RuleState};
 pub use scope::Scope;
+pub use store::Store;
+pub use variable::{
+    Value, ValueDef, ValueError, ValueResult, ValueStore, Variable, VariableDef, VariableStore,
+    WeakVariable, WeakVariableSet,
+};
 
 pub use weak_table::traits::{WeakElement, WeakKey};
 
@@ -34,6 +40,7 @@ pub use artifact::Js as ArtifactJs;
 pub use directory::Js as DirectoryJs;
 pub use rule::Js as RuleJs;
 pub use scope::Js as ScopeJs;
+pub use variable::Js as VariableJs;
 
 pub use compiler::GccJs;
 

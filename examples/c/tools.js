@@ -1,7 +1,15 @@
 import { Rule } from "gear";
 import { exec, sleep } from "system";
 
-export default function({obj_dir, lib_dir, inc_dir, bin_dir}) {
+export default function({obj_dir, lib_dir, bin_dir, inc_dirs = [], cdefs = {}, cflags = []}) {
+    let cflags_full = [
+        ...inc_dirs.map(inc_dir => `-I${inc_dir.path}`),
+        ...Object.keys(cdefs).map(key => `-D${key}${cdefs[key] != null ? `=${cdefs[key]}` : ''}`),
+        ...cflags
+    ];
+
+    console.log(cflags_full.toString());
+
     function cc(src) {
         let obj = obj_dir.output(src.name + '.o');
         Rule(src, obj, async function compile() {
@@ -11,7 +19,7 @@ export default function({obj_dir, lib_dir, inc_dir, bin_dir}) {
             await sleep(500); // artifical delay
             let {status, output, error} = await exec({
                 cmd: "gcc",
-                args: ["-I", inc_dir.path, "-c", "-o", obj, src],
+                args: [...cflags_full, "-c", "-o", obj, src],
             });
             if (output) {
                 console.warn(`cc output: ${output}`);

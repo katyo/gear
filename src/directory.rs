@@ -41,11 +41,11 @@ impl Directory {
     }
 
     pub fn input<P: AsRef<RelativePath>>(&self, name: P) -> Result<Artifact<Input, Actual>> {
-        Artifact::new(self, self.0.path.join(name).to_string())
+        Artifact::new(self, self.0.path.join(name).to_string(), "")
     }
 
     pub fn output<P: AsRef<RelativePath>>(&self, name: P) -> Result<Artifact<Output, Actual>> {
-        Artifact::new(self, self.0.path.join(name).to_string())
+        Artifact::new(self, self.0.path.join(name).to_string(), "")
         /*let path = self.0.path.join(name).to_string();
         let artifact = Artifact::new(self, &path);
         if artifact.has_builder() {

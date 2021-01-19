@@ -36,6 +36,15 @@ features = ["derive"]
 
 [dependencies.serde_json]
 version = "^1"
+features = ["preserve_order"]
+
+[dependencies.serde_yaml]
+version = "^0.8"
+optional = true
+
+[dependencies.toml]
+version = "^0.5"
+optional = true
 
 [dependencies.either]
 version = "^1"
@@ -113,6 +122,8 @@ features = ["exports", "loader", "either", "indexmap", "classes", "properties", 
 [features]
 default = [
   "parallel",
+  "yaml",
+  "toml",
   "fifo",
   "watch",
   "webui",
@@ -123,6 +134,7 @@ watch = ["notify"]
 webui = ["tide"]
 http-client = ["surf"]
 fifo = ["nix"]
+yaml = ["serde_yaml"]
 
 [profile.release]
 opt-level = 3

@@ -12,6 +12,9 @@ const RULES_FILES: &str = "Gearfile, Gearfile.js, Gear.js";
 /// Default config files
 const CONFIG_FILES: &str = "gear.json, gear.yaml, gear.toml";
 
+/// Default config file
+const CONFIG_FILE: &str = "gear.toml";
+
 #[cfg(unix)]
 const PATHS_DELIMITER: &str = ":";
 
@@ -144,11 +147,16 @@ impl Args {
     }
 
     pub async fn find_file(&self) -> Option<String> {
-        self.file_select(&self.file, RULES_FILES).await
+        self.file_select(&self.base, &self.file, RULES_FILES).await
     }
 
     pub async fn find_config(&self) -> Option<String> {
-        self.file_select(&self.config, CONFIG_FILES).await
+        self.file_select(&Path::new(""), &self.config, CONFIG_FILES)
+            .await
+    }
+
+    pub fn default_config(&self) -> String {
+        Path::new(CONFIG_FILE).to_str().map(String::from).unwrap()
     }
 
     pub fn gen_completions(&self) {
@@ -181,14 +189,14 @@ impl Args {
         self.input.iter().filter_map(|item| item.to_name())
     }
 
-    async fn file_select(&self, path: &Path, candidates: &str) -> Option<String> {
+    async fn file_select(&self, base: &Path, path: &Path, candidates: &str) -> Option<String> {
         if path != Path::new(candidates) {
             return path.to_str().map(String::from);
         }
         for candidate in candidates.split(", ") {
-            let path = self.base.join(candidate);
+            let path = base.join(candidate);
             if path.is_file().await {
-                return Some(candidate.to_string());
+                return path.to_str().map(String::from);
             }
         }
         None

@@ -32,7 +32,7 @@ impl Display for ArtifactKind {
 
 pub struct Internal {
     name: String,
-    desc: Mut<String>,
+    description: String,
     kind: ArtifactKind,
     time: Mut<Time>,
     rule: Mut<Option<Rule>>,
@@ -175,13 +175,14 @@ where
     U: IsArtifactUsage,
     K: IsArtifactKind,
 {
-    fn new_raw<S: Into<String>>(name: S) -> Self {
+    fn new_raw<N: Into<String>, D: Into<String>>(name: N, description: D) -> Self {
         let name = name.into();
+        let description = description.into();
         log::debug!("Artifact::new `{}`", name);
         Self(
             Ref::new(Internal {
-                name: name.into(),
-                desc: Default::default(),
+                name,
+                description,
                 kind: K::KIND,
                 time: Mut::new(Time::UNIX_EPOCH),
                 rule: Default::default(),
@@ -190,13 +191,15 @@ where
         )
     }
 
-    pub fn new<A, S>(set: A, name: S) -> Result<Self>
+    pub fn new<A, N, D>(set: A, name: N, description: D) -> Result<Self>
     where
         A: AsRef<ArtifactStore>,
-        S: Into<String>,
+        N: Into<String>,
+        D: Into<String>,
     {
         let set = K::set(set.as_ref());
         let name = name.into();
+        let description = description.into();
         {
             // try reuse already existing artifact
             if let Some(artifact) = set.read().get(&name) {
@@ -207,7 +210,7 @@ where
                 };
             }
         }
-        let artifact = Self::new_raw(name);
+        let artifact = Self::new_raw(name, description);
         set.write().insert(artifact.clone().into_usage());
         Ok(artifact)
     }
@@ -226,12 +229,8 @@ impl<U, K> Artifact<U, K> {
         &self.0.name
     }
 
-    pub fn description(&self) -> String {
-        self.0.desc.read().clone()
-    }
-
-    pub fn set_description(&self, text: impl Into<String>) {
-        *self.0.desc.write() = text.into();
+    pub fn description(&self) -> &String {
+        &self.0.description
     }
 
     pub fn time(&self) -> Time {
@@ -354,7 +353,8 @@ impl<U, K> Artifact<U, K> {
         write!(f, "{:ident$}{}", "", self.name(), ident = spaces)?;
         let text = self.description();
         if !text.is_empty() {
-            writeln!(f, "    {}", text)?;
+            " // ".fmt(f)?;
+            text.fmt(f)?;
         }
         '\n'.fmt(f)?;
         Ok(())
@@ -465,7 +465,7 @@ pub struct AnyKind<A>(pub A);
 macro_rules! any_kind {
 	  ($($usage:ident $($kind:ident)*;)*) => {
 		    $(
-            impl<'js> qjs::FromJs<'js> for AnyKind<&Artifact<$usage>> {
+            impl<'js> qjs::FromJs<'js> for AnyKind<&'js Artifact<$usage>> {
                 fn from_js(ctx: qjs::Ctx<'js>, val: qjs::Value<'js>) -> qjs::Result<Self> {
                     <&Artifact<$usage>>::from_js(ctx, val.clone())
                         .map(AnyKind)
@@ -604,11 +604,16 @@ mod js {
         #[quickjs(rename = "new", hide)]
         pub fn ctor() -> Self {}
 
-        #[quickjs(get, hide)]
+        #[quickjs(get, enumerable, hide)]
         pub fn name(&self) -> &String {}
 
-        #[quickjs(get, hide)]
+        #[quickjs(get, enumerable, hide)]
         pub fn description(&self) -> String {}
+
+        #[quickjs(rename = "toString")]
+        pub fn to_string_js(&self) -> String {
+            self.to_string()
+        }
     }
 
     pub type GenericOutput = Artifact<Output>;
@@ -617,17 +622,22 @@ mod js {
         #[quickjs(rename = "new", hide)]
         pub fn ctor() -> Self {}
 
-        #[quickjs(get, hide)]
+        #[quickjs(get, enumerable, hide)]
         pub fn name(&self) -> &String {}
 
-        #[quickjs(get, hide)]
-        pub fn description(&self) -> String {}
+        #[quickjs(get, enumerable, hide)]
+        pub fn description(&self) -> &String {}
 
-        #[quickjs(get, hide)]
+        #[quickjs(get, enumerable, hide)]
         pub fn rule(&self) -> Option<Rule> {}
 
-        #[quickjs(get, hide)]
+        #[quickjs(get, enumerable, hide)]
         pub fn input(&self) -> Artifact<Input> {}
+
+        #[quickjs(rename = "toString")]
+        pub fn to_string_js(&self) -> String {
+            self.to_string()
+        }
     }
 
     pub type ActualInput = Artifact<Input, Actual>;
@@ -636,11 +646,16 @@ mod js {
         #[quickjs(rename = "new", hide)]
         pub fn ctor() -> Self {}
 
-        #[quickjs(get, hide)]
+        #[quickjs(get, enumerable, hide)]
         pub fn name(&self) -> &String {}
 
-        #[quickjs(get, hide)]
-        pub fn description(&self) -> String {}
+        #[quickjs(get, enumerable, hide)]
+        pub fn description(&self) -> &String {}
+
+        #[quickjs(rename = "toString")]
+        pub fn to_string_js(&self) -> String {
+            self.to_string()
+        }
     }
 
     pub type ActualOutput = Artifact<Output, Actual>;
@@ -649,22 +664,22 @@ mod js {
         #[quickjs(rename = "new", hide)]
         pub fn ctor() -> Self {}
 
-        #[quickjs(get, hide)]
+        #[quickjs(get, enumerable, hide)]
         pub fn name(&self) -> &String {}
 
-        #[quickjs(get, hide)]
-        pub fn description(&self) -> String {}
+        #[quickjs(get, enumerable, hide)]
+        pub fn description(&self) -> &String {}
 
-        #[quickjs(rename = "description", set)]
-        pub fn set_description_js(&self, text: String) {
-            self.set_description(text)
-        }
-
-        #[quickjs(get, hide)]
+        #[quickjs(get, enumerable, hide)]
         pub fn rule(&self) -> Option<Rule> {}
 
-        #[quickjs(get, hide)]
+        #[quickjs(get, enumerable, hide)]
         pub fn input(&self) -> Artifact<Input, Actual> {}
+
+        #[quickjs(rename = "toString")]
+        pub fn to_string_js(&self) -> String {
+            self.to_string()
+        }
     }
 
     pub type PhonyInput = Artifact<Input, Phony>;
@@ -673,11 +688,16 @@ mod js {
         #[quickjs(rename = "new", hide)]
         pub fn ctor() -> Self {}
 
-        #[quickjs(get, hide)]
+        #[quickjs(get, enumerable, hide)]
         pub fn name(&self) -> &String {}
 
-        #[quickjs(get, hide)]
-        pub fn description(&self) -> String {}
+        #[quickjs(get, enumerable, hide)]
+        pub fn description(&self) -> &String {}
+
+        #[quickjs(rename = "toString")]
+        pub fn to_string_js(&self) -> String {
+            self.to_string()
+        }
     }
 
     pub type PhonyOutput = Artifact<Output, Phony>;
@@ -686,21 +706,21 @@ mod js {
         #[quickjs(rename = "new", hide)]
         pub fn ctor() -> Self {}
 
-        #[quickjs(get, hide)]
+        #[quickjs(get, enumerable, hide)]
         pub fn name(&self) -> &String {}
 
-        #[quickjs(get, hide)]
-        pub fn description(&self) -> String {}
+        #[quickjs(get, enumerable, hide)]
+        pub fn description(&self) -> &String {}
 
-        #[quickjs(rename = "description", set)]
-        pub fn set_description_js(&self, text: String) {
-            self.set_description(text)
-        }
-
-        #[quickjs(get, hide)]
+        #[quickjs(get, enumerable, hide)]
         pub fn rule(&self) -> Option<Rule> {}
 
-        #[quickjs(get, hide)]
+        #[quickjs(get, enumerable, hide)]
         pub fn input(&self) -> Artifact<Input, Phony> {}
+
+        #[quickjs(rename = "toString")]
+        pub fn to_string_js(&self) -> String {
+            self.to_string()
+        }
     }
 }

@@ -2,26 +2,48 @@
 import tools from "./tools";
 import { remove, exec } from "system";
 
-let src_dir = base.child("src");
-let inc_dir = base.child("include");
-let out_dir = dest.child("debug");
-let obj_dir = out_dir.child("obj");
-let lib_dir = out_dir;
-let bin_dir = out_dir;
+export default async function({ root, base, dest }) {
+    let src_dir = base.child("src");
+    let inc_dir = base.child("include");
 
-let {cc, ar, ld} = tools({obj_dir, lib_dir, inc_dir, bin_dir});
+    let out_dir = dest.child("debug");
+    let obj_dir = out_dir.child("obj");
+    let lib_dir = out_dir;
+    let bin_dir = out_dir;
 
-let build = root.scope("build");
-let build_all = root.goal("build", "Build all", async function build() {
-    console.log("build complete");
-});
-let clean_all = root.goal("clean", "Clean all", async function clean() {
-    await remove(out_dir.path);
-    console.log("clean complete");
-});
-let run = root.scope("run");
+    let build_all = root.goal("build", "Build all", async function build() {
+        console.log("build complete");
+    });
+    let clean_all = root.goal("clean", "Clean all", async function clean() {
+        await remove(out_dir.path);
+        console.log("clean complete");
+    });
 
-export default async function() {
+    let lib = root.scope("lib", "Library scope");
+    let bin = root.scope("bin", "Executable scope");
+
+    let build_lib = lib.goal("build", "Build library");
+    let build_bin = bin.goal("build", "Build executable");
+
+    let config = {
+        program: bin.var("program", "Program name", {
+            type: "string",
+            max: 16,
+        }, "hello"),
+        version: bin.var("version", "Program version", {
+            type: "tuple",
+            values: Array(3).fill({type: "int", min: 0, max: 255}),
+        }, [0, 0, 0]),
+    };
+
+    console.log('' + config.program);
+    console.log('' + config.version);
+
+    let {cc, ar, ld} = tools({obj_dir, lib_dir, bin_dir, inc_dirs: [inc_dir], cdefs: {
+        PROGRAM: `"${config.program.value}"`,
+        VERSION: `{${config.version.value}}`,
+    }});
+
     let lib_srcs = [
         "hello.c",
         "bye.c",
@@ -34,16 +56,10 @@ export default async function() {
     let lib_objs = lib_srcs.map(cc);
     let bin_objs = bin_srcs.map(cc);
 
-    let lib = ar("hello", lib_objs);
-    let bin = ld("hello", [...bin_objs, lib]);
+    build_lib.inputs = ar("hello", lib_objs);
+    build_bin.inputs = ld("hello", [...bin_objs, ...build_lib.inputs]);
 
-    let build_bin = build.goal("bin", "Build main binary");
-    build_bin.inputs = bin;
-
-    let build_lib = build.goal("lib", "Build library");
-    build_lib.inputs = lib;
-
-    let run_bin = run.goal("bin", "Run main executable", async function run_bin() {
+    let run_bin = bin.goal("run", "Run executable", async function run_bin() {
         console.info(`run ${bin.name}`);
         let res;
         try {
@@ -61,7 +77,7 @@ export default async function() {
             console.error(`${bin.name} (stderr): ${res.error}`);
         }
     });
-    run_bin.inputs = bin;
+    run_bin.inputs = build_bin.inputs;
 
     build_all.inputs = [build_lib.input, build_bin.input];
 }

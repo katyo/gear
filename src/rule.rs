@@ -80,6 +80,13 @@ impl Hash for Rule {
     }
 }
 
+impl Display for Rule {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        "Rule #".fmt(f)?;
+        self.id.fmt(f)
+    }
+}
+
 impl Rule {
     pub fn from_api(api: Ref<dyn RuleApi>) -> Self {
         let mut hasher = fxhash::FxHasher::default();
@@ -147,6 +154,12 @@ impl Drop for NoInternal {
 #[repr(transparent)]
 pub struct NoRule(Ref<NoInternal>);
 
+impl Display for NoRule {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        "NoRule".fmt(f)
+    }
+}
+
 impl NoRule {
     fn to_dyn(&self) -> Rule {
         Rule::from_api(self.0.clone())
@@ -201,6 +214,12 @@ impl Drop for JsInternal {
 #[derive(Clone, Deref, qjs::HasRefs)]
 #[repr(transparent)]
 pub struct JsRule(#[quickjs(has_refs)] Ref<JsInternal>);
+
+impl Display for JsRule {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        "JsRule".fmt(f)
+    }
+}
 
 impl JsRule {
     fn to_dyn(&self) -> Rule {
@@ -263,14 +282,19 @@ mod js {
             unimplemented!();
         }
 
-        #[quickjs(get)]
+        #[quickjs(get, enumerable)]
         pub fn inputs(&self) -> Vec<Artifact<Input>> {
             self.api.inputs()
         }
 
-        #[quickjs(get)]
+        #[quickjs(get, enumerable)]
         pub fn outputs(&self) -> Vec<Artifact<Output>> {
             self.api.outputs()
+        }
+
+        #[quickjs(rename = "toString")]
+        pub fn to_string_js(&self) -> String {
+            self.to_string()
         }
     }
 
@@ -366,7 +390,7 @@ mod js {
             Self::new_raw(inputs, outputs)
         }
 
-        #[quickjs(get)]
+        #[quickjs(get, enumerable)]
         pub fn inputs(&self) -> Vec<Artifact<Input>> {
             self.0.inputs.read().iter().cloned().collect()
         }
@@ -382,9 +406,14 @@ mod js {
             );
         }
 
-        #[quickjs(get)]
+        #[quickjs(get, enumerable)]
         pub fn outputs(&self) -> Vec<Artifact<Output>> {
             self.0.outputs.iter().collect()
+        }
+
+        #[quickjs(rename = "toString")]
+        pub fn to_string_js(&self) -> String {
+            self.to_string()
         }
     }
 
@@ -433,7 +462,7 @@ mod js {
             Self::new_raw(inputs, outputs, function, context)
         }
 
-        #[quickjs(get)]
+        #[quickjs(get, enumerable)]
         pub fn inputs(&self) -> Vec<Artifact<Input>> {
             self.0.inputs.read().iter().cloned().collect()
         }
@@ -449,9 +478,14 @@ mod js {
             );
         }
 
-        #[quickjs(get)]
+        #[quickjs(get, enumerable)]
         pub fn outputs(&self) -> Vec<Artifact<Output>> {
             self.0.outputs.iter().collect()
+        }
+
+        #[quickjs(rename = "toString")]
+        pub fn to_string_js(&self) -> String {
+            self.to_string()
         }
     }
 }

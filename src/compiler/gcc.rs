@@ -52,8 +52,9 @@ pub struct Gcc(Ref<Internal>);
 mod js {
     pub use super::*;
 
+    #[quickjs(cloneable)]
     impl Gcc {
-        pub async fn new() -> Self {
+        pub fn new() -> Self {
             unimplemented!();
         }
 
@@ -75,17 +76,17 @@ mod js {
         }
 
         #[quickjs(get, enumerable)]
-        pub fn version(&self) -> String {
-            self.0.version.clone()
+        pub fn version(&self) -> &String {
+            &self.0.version
         }
 
         #[quickjs(get, enumerable)]
-        pub fn machine(&self) -> String {
-            self.0.machine.clone()
+        pub fn machine(&self) -> &String {
+            &self.0.machine
         }
 
         #[quickjs(get, enumerable)]
-        pub async fn sysroot(&self) -> Result<String> {
+        pub async fn sysroot(self) -> Result<String> {
             Ok(exec_out(&self.0.path, &["-print-sysroot"])
                 .await?
                 .0
@@ -94,7 +95,7 @@ mod js {
         }
 
         #[quickjs(get, enumerable)]
-        pub async fn search_dirs(&self) -> Result<Vec<String>> {
+        pub async fn search_dirs(self) -> Result<Vec<String>> {
             Ok(exec_out(&self.0.path, &["-print-search-dirs"])
                 .await?
                 .0

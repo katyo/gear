@@ -2,6 +2,7 @@ use crate::{qjs, Artifact, Mut, Ref, Set, Weak, WeakElement, WeakKey, WeakSet};
 use derive_deref::Deref;
 use std::{
     borrow::Borrow,
+    fmt::{Display, Formatter, Result as FmtResult},
     hash::{Hash, Hasher},
 };
 
@@ -46,6 +47,14 @@ impl Hash for Internal {
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct Goal(Ref<Internal>);
+
+impl Display for Goal {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        "Goal `".fmt(f)?;
+        self.0.name.fmt(f)?;
+        '`'.fmt(f)
+    }
+}
 
 impl Goal {
     pub fn new_raw<S: Into<String>>(name: S) -> Self {
@@ -179,5 +188,10 @@ mod js {
         pub fn remove_artifact(&self, artifact: &Artifact) {
             self.0.artifacts.write().remove(artifact);
         }*/
+
+        #[quickjs(rename = "toString")]
+        pub fn to_string_js(&self) -> String {
+            self.to_string()
+        }
     }
 }
