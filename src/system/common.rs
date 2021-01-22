@@ -2,7 +2,7 @@ pub use async_std::{
     fs::{create_dir_all, read as read_file, remove_file, write as write_file},
     path::{Path, PathBuf},
     prelude::*,
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
     task::spawn_local as spawn,
 };
 pub use relative_path::*;
@@ -35,11 +35,42 @@ pub async fn which(name: &str) -> Option<PathBuf> {
     which::which(name).ok().map(|path| path.into())
 }
 
+pub struct ExecOut<R> {
+    pub cmd: String,
+    pub res: R,
+    pub out: String,
+    pub err: String,
+}
+
+impl ExecOut<ExitStatus> {
+    pub fn is_success(&self) -> bool {
+        self.res.success()
+    }
+
+    pub fn success(self) -> Result<ExecOut<i32>> {
+        if self.res.success() {
+            Ok(ExecOut {
+                cmd: self.cmd,
+                res: self.res.code().unwrap(),
+                out: self.out,
+                err: self.err,
+            })
+        } else {
+            Err(self
+                .res
+                .code()
+                .map(|code| format!("Failed executing `{:?}`. Status: {}", self.cmd, code))
+                .unwrap_or_else(|| format!("Failed executing `{:?}`. Killed", self.cmd))
+                .into())
+        }
+    }
+}
+
 /// Simply execute an arbitrary program to collect output.
-pub async fn exec_out<S: AsRef<OsStr>, A: AsRef<OsStr>>(
-    cmd: S,
-    args: &[A],
-) -> Result<(String, String)> {
+pub async fn exec_out(
+    cmd: impl AsRef<OsStr>,
+    args: &[impl AsRef<OsStr>],
+) -> Result<ExecOut<ExitStatus>> {
     let cmd = cmd.as_ref();
     let out = Command::new(cmd)
         .args(args)
@@ -47,17 +78,12 @@ pub async fn exec_out<S: AsRef<OsStr>, A: AsRef<OsStr>>(
         .env("LC_ALL", "C")
         .output()
         .await?;
-    if !out.status.success() {
-        return Err(out
-            .status
-            .code()
-            .map(|code| format!("Failed executing `{:?}`. Status: {}", cmd, code))
-            .unwrap_or_else(|| format!("Failed executing `{:?}`. Killed", cmd))
-            .into());
-    }
-    let err = String::from_utf8(out.stderr)?;
-    let out = String::from_utf8(out.stdout)?;
-    Ok((out, err))
+    Ok(ExecOut {
+        cmd: format!("{:?}", cmd),
+        res: out.status,
+        out: String::from_utf8(out.stdout)?,
+        err: String::from_utf8(out.stderr)?,
+    })
 }
 
 /// Temporary file which will be removed when handle is dropped

@@ -320,7 +320,14 @@ impl<U, K> Artifact<U, K> {
         *self.0.time.write() = time;
     }
 
-    pub async fn init(self) -> Result<()> {
+    pub fn is_init(&self) -> bool {
+        self.time() > Time::UNIX_EPOCH
+    }
+
+    pub async fn init(&self) -> Result<()> {
+        if self.is_init() {
+            return Ok(());
+        }
         let path = Path::new(self.name());
         if self.is_source() {
             if !access(path, AccessMode::READ).await {

@@ -104,15 +104,23 @@ impl Main {
                 }
 
                 let jobs = args.get_jobs();
-                state.init_rules(jobs).await?;
+
+                #[cfg(not(feature = "watch"))]
                 state.build_rules(jobs, args.dry_run).await?;
 
                 #[cfg(feature = "watch")]
                 if args.watch {
+                    // do not panic when rules fails to build completely
+                    if let Err(error) = state.build_rules(jobs, args.dry_run).await {
+                        eprintln!("{}", error);
+                    }
+
                     if state.watch_inputs(jobs, args.dry_run).await? {
                         log::debug!("Reloading rules");
                         continue;
                     }
+                } else {
+                    state.build_rules(jobs, args.dry_run).await?;
                 }
             }
 
@@ -180,9 +188,6 @@ impl State {
     fn init_js<P: AsRef<str>>(paths: &[P]) -> Result<(qjs::Runtime, qjs::Context, qjs::Compile)> {
         let rt = qjs::Runtime::new()?;
         let ctx = qjs::Context::full(&rt)?;
-
-        rt.spawn_executor::<qjs::AsyncStd>();
-
         let compile = qjs::Compile::new();
 
         rt.set_loader(
@@ -211,7 +216,14 @@ impl State {
             ),
         );
 
-        ctx.with(|ctx| ctx.globals().init_def::<gear::ConsoleJs>())?;
+        rt.spawn_executor::<qjs::AsyncStd>();
+
+        ctx.with(|ctx| -> Result<()> {
+            let globals = ctx.globals();
+            globals.init_def::<gear::ExtensionsJs>()?;
+            globals.init_def::<gear::ConsoleJs>()?;
+            Ok(())
+        })?;
 
         Ok((rt, ctx, compile))
     }
@@ -278,12 +290,6 @@ impl State {
             ),
         }
         Ok(())
-    }
-
-    pub async fn init_rules(&self, _jobs: usize) -> Result<()> {
-        log::debug!("Init goals: {:?}", self.props.goals);
-        let store: &gear::ArtifactStore = self.scope.as_ref();
-        store.prepare().await
     }
 
     pub async fn build_rules(&self, jobs: usize, dry_run: bool) -> Result<()> {

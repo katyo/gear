@@ -44,20 +44,20 @@ export default async function({ root, base, dest }) {
         VERSION: `{${config.version.value}}`,
     }});
 
-    let lib_srcs = [
+    let lib_srcs = await [
         "hello.c",
         "bye.c",
-    ].map((src) => src_dir.input(src));
+    ].map((src) => src_dir.input(src)).asyncAll;
 
-    let bin_srcs = [
+    let bin_srcs = await [
         "main.c"
-    ].map((src) => src_dir.input(src));
+    ].map((src) => src_dir.input(src)).asyncAll;
 
-    let lib_objs = lib_srcs.map(cc);
-    let bin_objs = bin_srcs.map(cc);
+    let lib_objs = await lib_srcs.map(cc).asyncAll;
+    let bin_objs = await bin_srcs.map(cc).asyncAll;
 
-    build_lib.inputs = ar("hello", lib_objs);
-    build_bin.inputs = ld("hello", [...bin_objs, ...build_lib.inputs]);
+    build_lib.inputs = await ar("hello", lib_objs);
+    build_bin.inputs = await ld("hello", [...bin_objs, ...build_lib.inputs]);
 
     let run_bin = bin.goal("run", "Run executable", async function run_bin() {
         console.info(`run ${bin.name}`);
@@ -80,4 +80,6 @@ export default async function({ root, base, dest }) {
     run_bin.inputs = build_bin.inputs;
 
     build_all.inputs = [build_lib.input, build_bin.input];
+
+    console.log("rules done");
 }

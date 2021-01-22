@@ -88,7 +88,9 @@ impl Display for Rule {
 }
 
 impl Rule {
-    pub fn from_api(api: Ref<dyn RuleApi>) -> Self {
+    pub fn from_api(api: impl RuleApi + 'static) -> Self {
+        let api: Ref<dyn RuleApi> = Ref::new(api);
+
         let mut hasher = fxhash::FxHasher::default();
         for output in api.outputs() {
             output.hash(&mut hasher);
@@ -179,7 +181,7 @@ impl NoRule {
     }
 }
 
-impl RuleApi for NoInternal {
+impl RuleApi for Ref<NoInternal> {
     fn inputs(&self) -> Vec<Artifact<Input>> {
         self.inputs.read().iter().cloned().collect()
     }
@@ -223,7 +225,7 @@ impl Display for JsRule {
 
 impl JsRule {
     fn to_dyn(&self) -> Rule {
-        Rule::from_api(Ref::new(self.0.clone()))
+        Rule::from_api(self.0.clone())
     }
 
     pub fn new_raw(

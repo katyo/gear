@@ -29,29 +29,27 @@ impl AsRef<RelativePath> for Directory {
 }
 
 impl Directory {
-    pub fn new<A: AsRef<ArtifactStore>, P: Into<RelativePathBuf>>(artifacts: A, path: P) -> Self {
+    pub fn new(artifacts: impl AsRef<ArtifactStore>, path: impl Into<RelativePathBuf>) -> Self {
         Self(Ref::new(Internal {
             artifacts: artifacts.as_ref().clone(),
             path: path.into(),
         }))
     }
 
-    pub fn child<P: AsRef<RelativePath>>(&self, path: P) -> Self {
+    pub fn child(&self, path: impl AsRef<RelativePath>) -> Self {
         Self::new(self, self.0.path.join(path))
     }
 
-    pub fn input<P: AsRef<RelativePath>>(&self, name: P) -> Result<Artifact<Input, Actual>> {
-        Artifact::new(self, self.0.path.join(name).to_string(), "")
+    pub async fn input(&self, name: impl AsRef<RelativePath>) -> Result<Artifact<Input, Actual>> {
+        let artifact = Artifact::new(self, self.0.path.join(name).to_string(), "")?;
+        artifact.init().await?;
+        Ok(artifact)
     }
 
-    pub fn output<P: AsRef<RelativePath>>(&self, name: P) -> Result<Artifact<Output, Actual>> {
-        Artifact::new(self, self.0.path.join(name).to_string(), "")
-        /*let path = self.0.path.join(name).to_string();
-        let artifact = Artifact::new(self, &path);
-        if artifact.has_builder() {
-            return Err(format!("Output artifact already exists `{}`", path).into());
-        }
-        Ok(artifact)*/
+    pub async fn output(&self, name: impl AsRef<RelativePath>) -> Result<Artifact<Output, Actual>> {
+        let artifact = Artifact::new(self, self.0.path.join(name).to_string(), "")?;
+        artifact.init().await?;
+        Ok(artifact)
     }
 }
 
@@ -60,6 +58,7 @@ impl Directory {
 mod js {
     pub use super::*;
 
+    #[quickjs(cloneable)]
     impl Directory {
         #[quickjs(rename = "new")]
         pub fn ctor() -> Self {
@@ -84,14 +83,16 @@ mod js {
                 .map(|path| Self::new(self, path.to_owned()))
         }
 
+        #[doc(hidden)]
         #[quickjs(rename = "input")]
-        pub fn _input(&self, name: String) -> Result<Artifact<Input, Actual>> {
-            self.input(name)
+        pub async fn input_js(self, name: String) -> Result<Artifact<Input, Actual>> {
+            self.input(name).await
         }
 
+        #[doc(hidden)]
         #[quickjs(rename = "output")]
-        pub fn _output(&self, name: String) -> Result<Artifact<Output, Actual>> {
-            self.output(name)
+        pub async fn output_js(self, name: String) -> Result<Artifact<Output, Actual>> {
+            self.output(name).await
         }
     }
 }

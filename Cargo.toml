@@ -56,6 +56,9 @@ features = ["serde"]
 [dependencies.fxhash]
 version = "^0.2"
 
+[dependencies.blake3]
+version = "^0.3"
+
 [dependencies.weak-table]
 version = "^0.3"
 
@@ -77,8 +80,8 @@ version = "^1"
 [dependencies.futures]
 version = "^0.3"
 
-#[dependencies.base64]
-#version = "^0.13"
+[dependencies.base64]
+version = "^0.13"
 
 [dependencies.rand]
 version = "^0.8"

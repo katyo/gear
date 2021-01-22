@@ -10,8 +10,8 @@ export default function({obj_dir, lib_dir, bin_dir, inc_dirs = [], cdefs = {}, c
 
     console.log(cflags_full.toString());
 
-    function cc(src) {
-        let obj = obj_dir.output(src.name + '.o');
+    async function cc(src) {
+        let obj = await obj_dir.output(src.name + '.o');
         Rule(src, obj, async function compile() {
             let src = this.inputs[0].name;
             let obj = this.outputs[0].name;
@@ -35,8 +35,8 @@ export default function({obj_dir, lib_dir, bin_dir, inc_dirs = [], cdefs = {}, c
     }
 
     // Archiver
-    function ar(name, objs) {
-        let lib = lib_dir.output(`lib${name}.a`);
+    async function ar(name, objs) {
+        let lib = await lib_dir.output(`lib${name}.a`);
         Rule(objs, lib, async function link() {
             let objs = this.inputs.map(obj => obj.name);
             let lib = this.outputs[0].name;
@@ -60,8 +60,8 @@ export default function({obj_dir, lib_dir, bin_dir, inc_dirs = [], cdefs = {}, c
     }
 
     // Linker
-    function ld(name, objs, libs = []) {
-        let bin = bin_dir.output(name);
+    async function ld(name, objs, libs = []) {
+        let bin = await bin_dir.output(name);
         let libs_flags = libs.map(lib => `-l${lib}`);
         Rule(objs, bin, async function link() {
             let objs = this.inputs.map(obj => obj.name);

@@ -2,6 +2,8 @@ mod artifact;
 mod compiler;
 mod console;
 mod directory;
+mod extensions;
+mod hasher;
 mod processor;
 mod refs;
 mod result;
@@ -17,14 +19,12 @@ pub use result::*;
 pub use utils::*;
 
 pub use rquickjs as qjs;
-
-pub use console::Js as ConsoleJs;
-pub use system::Js as SystemJs;
-
 pub use std::time::{Duration, SystemTime as Time};
+pub use weak_table::traits::{WeakElement, WeakKey};
 
 pub use artifact::{Actual, AnyKind, Artifact, ArtifactStore, Input, Output, Phony, WeakArtifact};
 pub use directory::Directory;
+pub use hasher::DataHasher;
 pub use processor::RuleStateChange;
 pub use rule::{JsRule, NoRule, Rule, RuleApi, RuleId, RuleState};
 pub use scope::Scope;
@@ -34,7 +34,9 @@ pub use variable::{
     WeakVariable, WeakVariableSet,
 };
 
-pub use weak_table::traits::{WeakElement, WeakKey};
+pub use console::Js as ConsoleJs;
+pub use extensions::Js as ExtensionsJs;
+pub use system::Js as SystemJs;
 
 pub use artifact::Js as ArtifactJs;
 pub use directory::Js as DirectoryJs;

@@ -134,16 +134,6 @@ impl ArtifactStore {
         }
     }
 
-    pub async fn prepare(&self) -> Result<()> {
-        self.remove_expired();
-
-        log::debug!("Init artifacts");
-        self.init_artifacts().await?;
-
-        self.remove_expired();
-        Ok(())
-    }
-
     pub async fn process<S, I, F, R>(
         &self,
         goals: I,
@@ -167,6 +157,8 @@ impl ArtifactStore {
             emit,
         )
         .await?;
+
+        self.remove_expired();
 
         log::debug!("Done");
         Ok(())
@@ -202,13 +194,5 @@ impl ArtifactStore {
     fn remove_expired(&self) {
         self.actual.write().remove_expired();
         self.phony.write().remove_expired();
-    }
-
-    async fn init_artifacts(&self) -> Result<()> {
-        future::join_all(self.actual.read().iter().map(|artifact| artifact.init()))
-            .await
-            .into_iter()
-            .collect::<Result<_>>()?;
-        Ok(())
     }
 }
