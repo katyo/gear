@@ -1,15 +1,16 @@
 import { Rule } from "gear";
 import { exec, sleep } from "system";
 
-export default function({obj_dir, lib_dir, bin_dir, inc_dirs = [], cdefs = {}, cflags = []}) {
+export default async function({obj_dir, lib_dir, bin_dir, inc_dirs = [], cdefs = {}, cflags = []}) {
     let cflags_full = [
         ...inc_dirs.map(inc_dir => `-I${inc_dir.path}`),
         ...Object.keys(cdefs).map(key => `-D${key}${cdefs[key] != null ? `=${cdefs[key]}` : ''}`),
         ...cflags
     ];
 
-    console.log(cflags_full.toString());
+    //console.log(cflags_full.toString());
 
+    // C Compiler
     async function cc(src) {
         let obj = await obj_dir.output(src.name + '.o');
         Rule(src, obj, async function compile() {
@@ -31,7 +32,7 @@ export default function({obj_dir, lib_dir, bin_dir, inc_dirs = [], cdefs = {}, c
                 throw new Error(`Error when compiling ${src} Status: ${status}`);
             }
         });
-        return obj.input;
+        return obj;
     }
 
     // Archiver
@@ -56,7 +57,7 @@ export default function({obj_dir, lib_dir, bin_dir, inc_dirs = [], cdefs = {}, c
                 throw new Error(`Error when archiving ${name} Status: ${status}`);
             }
         });
-        return lib.input;
+        return lib;
     }
 
     // Linker
@@ -82,7 +83,7 @@ export default function({obj_dir, lib_dir, bin_dir, inc_dirs = [], cdefs = {}, c
                 throw new Error(`Error when linking ${name} Status: ${status}`);
             }
         });
-        return bin.input;
+        return bin;
     }
 
     return {cc, ar, ld};

@@ -41,15 +41,11 @@ impl Directory {
     }
 
     pub async fn input(&self, name: impl AsRef<RelativePath>) -> Result<Artifact<Input, Actual>> {
-        let artifact = Artifact::new(self, self.0.path.join(name).to_string(), "")?;
-        artifact.init().await?;
-        Ok(artifact)
+        Artifact::<Input, Actual>::new_init(self, self.0.path.join(name).to_string(), "").await
     }
 
     pub async fn output(&self, name: impl AsRef<RelativePath>) -> Result<Artifact<Output, Actual>> {
-        let artifact = Artifact::new(self, self.0.path.join(name).to_string(), "")?;
-        artifact.init().await?;
-        Ok(artifact)
+        Artifact::<Output, Actual>::new_init(self, self.0.path.join(name).to_string(), "").await
     }
 }
 

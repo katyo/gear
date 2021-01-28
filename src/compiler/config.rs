@@ -1,9 +1,10 @@
 use crate::{
     qjs,
-    system::{access, which, AccessMode, PathBuf},
+    system::{check_access, which, AccessMode, Path},
     Map, Result, Set,
 };
 use std::{
+    borrow::Cow,
     fmt::{Display, Formatter, Result as FmtResult},
     hash::{Hash, Hasher},
 };
@@ -225,6 +226,7 @@ impl Extend<CommonOpts> for CommonOpts {
 
 #[derive(Debug, Default, Clone, qjs::FromJs, qjs::IntoJs)]
 pub struct CompileOpts {
+    //pub lang: StrOpt, // -x...
     pub std: StrOpt, // -std...
     #[quickjs(default)]
     pub warn: OptMap, // -W...
@@ -242,6 +244,7 @@ pub struct CompileOpts {
 
 impl Hash for CompileOpts {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        //self.lang.hash(state);
         self.std.hash(state);
         for (key, val) in &self.warn {
             key.hash(state);
@@ -266,6 +269,7 @@ impl Hash for CompileOpts {
 
 impl FormatArgs for CompileOpts {
     fn fmt_args(&self, out: &mut Vec<String>) {
+        //("-x", &self.lang).fmt_args(out);
         ("-std=", &self.std).fmt_args(out);
         ("-W", &self.warn).fmt_args(out);
         ("-D", &self.defs).fmt_args(out);
@@ -282,6 +286,9 @@ impl Extend<CompileOpts> for CompileOpts {
         T: IntoIterator<Item = CompileOpts>,
     {
         for conf in iter {
+            //if conf.lang.is_some() {
+            //    self.lang = conf.lang;
+            //}
             if conf.std.is_some() {
                 self.std = conf.std;
             }
@@ -454,6 +461,79 @@ impl Extend<DumpOpts> for DumpOpts {
     }
 }
 
+#[derive(Debug, Clone, Default, qjs::FromJs, qjs::IntoJs)]
+pub struct StripOpts {
+    /// Strip options `--strip-...`
+    /// (all, debug, dwo, unneeded)
+    #[quickjs(default)]
+    strip: StrSet,
+    /// Keep options `--strip-...`
+    /// (file-symbols)
+    #[quickjs(default)]
+    keep: StrSet,
+    /// Discard options `--discard-...`
+    /// (all, local)
+    #[quickjs(default)]
+    discard: StrSet,
+    /// Remove or keep specified symbols
+    #[quickjs(default)]
+    symbols: Map<String, Option<bool>>,
+    /// Other flags
+    #[quickjs(default)]
+    flags: StrList,
+}
+
+impl Hash for StripOpts {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        for val in &self.strip {
+            val.hash(state);
+        }
+        for val in &self.keep {
+            val.hash(state);
+        }
+        for val in &self.discard {
+            val.hash(state);
+        }
+        for val in &self.symbols {
+            val.hash(state);
+        }
+        self.flags.hash(state);
+    }
+}
+
+impl FormatArgs for StripOpts {
+    fn fmt_args(&self, out: &mut Vec<String>) {
+        ("--strip-", &self.strip).fmt_args(out);
+        ("--keep-", &self.keep).fmt_args(out);
+        ("--discard-", &self.discard).fmt_args(out);
+        for (symbol, option) in &self.symbols {
+            if let Some(value) = option {
+                out.push(format!(
+                    "--{}-symbol={}",
+                    if *value { "keep" } else { "strip" },
+                    symbol
+                ));
+            }
+        }
+        self.flags.fmt_args(out);
+    }
+}
+
+impl Extend<Self> for StripOpts {
+    fn extend<T>(&mut self, iter: T)
+    where
+        T: IntoIterator<Item = Self>,
+    {
+        for conf in iter {
+            self.strip.extend(conf.strip);
+            self.keep.extend(conf.keep);
+            self.discard.extend(conf.discard);
+            self.symbols.extend(conf.symbols);
+            self.flags.extend(conf.flags);
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Hash, qjs::FromJs, qjs::IntoJs)]
 pub struct ToolchainOpts {
     #[quickjs(default)]
@@ -464,6 +544,8 @@ pub struct ToolchainOpts {
     pub link: LinkOpts,
     #[quickjs(default)]
     pub dump: DumpOpts,
+    #[quickjs(default)]
+    pub strip: StripOpts,
 }
 
 impl Extend<ToolchainOpts> for ToolchainOpts {
@@ -476,15 +558,17 @@ impl Extend<ToolchainOpts> for ToolchainOpts {
             self.compile.extend(Some(conf.compile));
             self.link.extend(Some(conf.link));
             self.dump.extend(Some(conf.dump));
+            self.strip.extend(Some(conf.strip));
         }
     }
 }
 
-#[derive(Debug, Default, Clone, qjs::FromJs, qjs::IntoJs)]
+#[derive(Debug, Clone, Default, qjs::FromJs, qjs::IntoJs)]
 pub struct DetectOpts {
-    pub name: Option<String>,
-    pub path: Option<String>,
-    pub triple: Option<String>,
+    #[quickjs(default)]
+    pub compiler: String,
+    #[quickjs(default)]
+    pub target: String,
 }
 
 impl Extend<DetectOpts> for DetectOpts {
@@ -493,42 +577,54 @@ impl Extend<DetectOpts> for DetectOpts {
         T: IntoIterator<Item = DetectOpts>,
     {
         for conf in iter {
-            if conf.name.is_some() {
-                self.name = conf.name;
+            if !conf.compiler.is_empty() {
+                self.compiler = conf.compiler;
             }
-            if conf.path.is_some() {
-                self.path = conf.path;
-            }
-            if conf.triple.is_some() {
-                self.triple = conf.triple;
+            if !conf.target.is_empty() {
+                self.target = conf.target;
             }
         }
     }
 }
 
 impl DetectOpts {
-    pub async fn detect(&self, name: impl AsRef<str>) -> Result<PathBuf> {
-        let name = name.as_ref();
+    pub async fn detect(&self) -> Result<Self> {
+        let mut candidates = Vec::<Cow<'static, str>>::new();
 
-        let path = if let Some(path) = &self.path {
-            PathBuf::from(path)
-        } else {
-            let name = if let Some(triple) = &self.triple {
-                format!("{}-{}", triple, name)
-            } else if let Some(name) = &self.name {
-                name.clone()
+        if self.compiler.is_empty() {
+            if self.target.is_empty() {
+                candidates.push("gcc".into());
+                candidates.push("clang".into());
             } else {
-                name.into()
-            };
-            which(&name)
-                .await
-                .ok_or_else(|| format!("Unable to find executable `{}`", name))?
-        };
-
-        if !access(&path, AccessMode::EXECUTE).await {
-            return Err(format!("Unable to get access to executable `{}` ", path.display()).into());
+                candidates.push(format!("{}-gcc", self.target).into());
+                candidates.push(format!("{}-clang", self.target).into());
+                candidates.push("clang".into());
+            }
+        } else {
+            if self.target.is_empty() {
+                candidates.push(self.compiler.as_str().into());
+            } else {
+                candidates.push(format!("{}-{}", self.compiler, self.target).into());
+            }
+            candidates.push(self.compiler.as_str().into());
         }
 
-        Ok(path)
+        let mut this = self.clone();
+
+        for candidate in &candidates {
+            let name = candidate.as_ref();
+            let path = Path::new(name);
+            if path.is_file().await {
+                this.compiler = name.into();
+                break;
+            } else if let Some(path) = which(name).await {
+                this.compiler = path.display().to_string();
+                break;
+            }
+        }
+
+        check_access(&this.compiler, AccessMode::EXECUTE).await?;
+
+        Ok(this)
     }
 }

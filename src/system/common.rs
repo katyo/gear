@@ -3,13 +3,13 @@ pub use async_std::{
     path::{Path, PathBuf},
     prelude::*,
     process::{Command, ExitStatus, Stdio},
-    task::spawn_local as spawn,
+    task::{spawn_blocking, spawn_local as spawn},
 };
 pub use relative_path::*;
 pub use rquickjs as qjs;
 
 use crate::{Result, Time};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 
 pub use faccess::AccessMode;
 
@@ -22,17 +22,42 @@ pub async fn modified(path: &Path) -> Result<Time> {
 
 /// Check access to path
 ///
-/// TODO: Currently this function is synchronous but it is defined as async to avoid changing definition in the future.
-pub async fn access(path: &Path, mode: AccessMode) -> bool {
-    let path: &std::path::Path = path.into();
-    faccess::PathExt::access(path, mode).is_ok()
+/// TODO: Switch to async version of `faccess` when it will be awailable.
+pub async fn access(path: impl AsRef<Path>, mode: AccessMode) -> bool {
+    let path: std::path::PathBuf = path.as_ref().into();
+    spawn_blocking(move || faccess::PathExt::access(&*path, mode).is_ok()).await
+}
+
+pub async fn check_access(path: impl AsRef<Path>, mode: AccessMode) -> Result<()> {
+    let path = path.as_ref();
+    if access(path, mode).await {
+        Ok(())
+    } else {
+        let perms = &[
+            (AccessMode::READ, "read"),
+            (AccessMode::WRITE, "write"),
+            (AccessMode::EXECUTE, "exec"),
+        ]
+        .iter()
+        .filter_map(|(perm, name)| {
+            if mode.contains(*perm) {
+                Some(*name)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" or ");
+        Err(format!("Unable to get {} access to `{}` ", perms, path.display()).into())
+    }
 }
 
 /// Find executable by name in known paths
 ///
-/// TODO: Currently this function is synchronous but it is defined as async to avoid changing definition in the future.
-pub async fn which(name: &str) -> Option<PathBuf> {
-    which::which(name).ok().map(|path| path.into())
+/// TODO: Switch to async version of `which` when it will be awailable.
+pub async fn which(name: impl AsRef<OsStr>) -> Option<PathBuf> {
+    let name: OsString = name.as_ref().into();
+    spawn_blocking(move || which::which(&*name).ok().map(|path| path.into())).await
 }
 
 pub struct ExecOut<R> {
@@ -89,7 +114,6 @@ pub async fn exec_out(
 /// Temporary file which will be removed when handle is dropped
 pub struct TempFile {
     path: PathBuf,
-    pipe: bool,
 }
 
 impl Drop for TempFile {
@@ -140,7 +164,7 @@ impl TempFile {
             false
         };
 
-        Ok(Self { path, pipe })
+        Ok(Self { path })
     }
 
     fn rand_name(name: &mut [u8; 15]) {

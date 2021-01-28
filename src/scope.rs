@@ -1,6 +1,6 @@
 use crate::{
-    qjs, AnyKind, Artifact, ArtifactStore, Input, JsRule, Mut, NoRule, Output, Phony, Ref, Result,
-    Set, Store, Value, ValueDef, Variable, VariableStore, WeakVariableSet,
+    qjs, Artifact, ArtifactStore, Input, JsRule, Mut, NoRule, Output, Phony, Ref, Result, Set,
+    Store, Value, ValueDef, Variable, VariableStore,
 };
 use derive_deref::Deref;
 use either::Either;
@@ -368,10 +368,7 @@ mod js {
         }
 
         #[quickjs(rename = "inputs", set)]
-        pub fn set_inputs(
-            &self,
-            inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
-        ) {
+        pub fn set_inputs(&self, inputs: Either<Set<Artifact<Input>>, Artifact<Input>>) {
             self.0.set_inputs(inputs)
         }
 
@@ -399,10 +396,7 @@ mod js {
         }
 
         #[quickjs(rename = "inputs", set)]
-        pub fn set_inputs(
-            &self,
-            inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
-        ) {
+        pub fn set_inputs(&self, inputs: Either<Set<Artifact<Input>>, Artifact<Input>>) {
             self.0.set_inputs(inputs)
         }
 

@@ -1,7 +1,7 @@
 use crate::{
     qjs,
     system::{create_dir_all, Path},
-    AnyKind, Artifact, Input, Mut, Output, Ref, Result, Set, Time, WeakArtifact, WeakSet,
+    Artifact, Input, Mut, Output, Ref, Result, Set, Time, WeakArtifact, WeakSet,
 };
 use derive_deref::Deref;
 use either::Either;
@@ -45,10 +45,7 @@ impl Display for RuleState {
 }
 
 /// The builder interface
-pub trait RuleApi: Send + Sync {
-    //// Get the list of values
-    //fn values(&self) -> Vec<Ref<Value>>;
-
+pub trait RuleApi: qjs::SendWhenParallel {
     /// Get the list of inputs
     fn inputs(&self) -> Vec<Artifact<Input>>;
 
@@ -56,7 +53,7 @@ pub trait RuleApi: Send + Sync {
     fn outputs(&self) -> Vec<Artifact<Output>>;
 
     /// Run rule
-    fn invoke(&self) -> Pin<Box<dyn Future<Output = Result<()>>>>;
+    fn invoke(self: Ref<Self>) -> Pin<Box<dyn Future<Output = Result<()>>>>;
 }
 
 #[derive(Clone)]
@@ -88,9 +85,7 @@ impl Display for Rule {
 }
 
 impl Rule {
-    pub fn from_api(api: impl RuleApi + 'static) -> Self {
-        let api: Ref<dyn RuleApi> = Ref::new(api);
-
+    pub fn from_api(api: Ref<dyn RuleApi>) -> Self {
         let mut hasher = fxhash::FxHasher::default();
         for output in api.outputs() {
             output.hash(&mut hasher);
@@ -129,7 +124,7 @@ impl Rule {
                 }
             }
         }
-        self.api.invoke().await?;
+        self.api.clone().invoke().await?;
         let time = Time::now();
         for output in self.api.outputs() {
             output.set_time(time);
@@ -181,7 +176,7 @@ impl NoRule {
     }
 }
 
-impl RuleApi for Ref<NoInternal> {
+impl RuleApi for NoInternal {
     fn inputs(&self) -> Vec<Artifact<Input>> {
         self.inputs.read().iter().cloned().collect()
     }
@@ -190,7 +185,7 @@ impl RuleApi for Ref<NoInternal> {
         self.outputs.iter().collect()
     }
 
-    fn invoke(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    fn invoke(self: Ref<Self>) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -252,7 +247,7 @@ impl JsRule {
     }
 }
 
-impl RuleApi for Ref<JsInternal> {
+impl RuleApi for JsInternal {
     fn inputs(&self) -> Vec<Artifact<Input>> {
         self.inputs.read().iter().cloned().collect()
     }
@@ -261,10 +256,10 @@ impl RuleApi for Ref<JsInternal> {
         self.outputs.iter().collect()
     }
 
-    fn invoke(&self) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    fn invoke(self: Ref<Self>) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         let function = self.function.clone();
         let context = self.context.clone();
-        let this = JsRule(self.clone());
+        let this = JsRule(self);
         Box::pin(async move {
             let promise: qjs::Promise<()> =
                 context.with(|ctx| function.restore(ctx)?.call((qjs::This(this),)))?;
@@ -302,8 +297,8 @@ mod js {
 
     #[quickjs(rename = "Rule")]
     pub fn rule_js1<'js>(
-        inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
-        outputs: Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>,
+        inputs: Either<Set<Artifact<Input>>, Artifact<Input>>,
+        outputs: Either<Set<Artifact<Output>>, Artifact<Output>>,
         function: qjs::Persistent<qjs::Function<'static>>,
         ctx: qjs::Ctx<'js>,
     ) -> JsRule {
@@ -317,9 +312,9 @@ mod js {
 
     #[quickjs(rename = "Rule")]
     pub fn rule_js2<'js>(
-        outputs: Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>,
-        inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
         function: qjs::Persistent<qjs::Function<'static>>,
+        outputs: Either<Set<Artifact<Output>>, Artifact<Output>>,
+        inputs: Either<Set<Artifact<Input>>, Artifact<Input>>,
         ctx: qjs::Ctx<'js>,
     ) -> JsRule {
         JsRule::new_(
@@ -333,8 +328,8 @@ mod js {
     #[quickjs(rename = "Rule")]
     pub fn rule_js3<'js>(
         function: qjs::Persistent<qjs::Function<'static>>,
-        outputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>>,
-        inputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>>,
+        outputs: qjs::Opt<Either<Set<Artifact<Output>>, Artifact<Output>>>,
+        inputs: qjs::Opt<Either<Set<Artifact<Input>>, Artifact<Input>>>,
         ctx: qjs::Ctx<'js>,
     ) -> JsRule {
         JsRule::new_(function, outputs, inputs, ctx)
@@ -342,16 +337,16 @@ mod js {
 
     #[quickjs(rename = "Rule")]
     pub fn rule_no1<'js>(
-        inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
-        outputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>>,
+        inputs: Either<Set<Artifact<Input>>, Artifact<Input>>,
+        outputs: qjs::Opt<Either<Set<Artifact<Output>>, Artifact<Output>>>,
     ) -> NoRule {
         NoRule::new_(outputs, qjs::Opt(Some(inputs)))
     }
 
     #[quickjs(rename = "Rule")]
     pub fn rule_no2<'js>(
-        outputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>>,
-        inputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>>,
+        outputs: qjs::Opt<Either<Set<Artifact<Output>>, Artifact<Output>>>,
+        inputs: qjs::Opt<Either<Set<Artifact<Input>>, Artifact<Input>>>,
     ) -> NoRule {
         NoRule::new_(outputs, inputs)
     }
@@ -360,32 +355,27 @@ mod js {
     impl NoRule {
         #[quickjs(rename = "new")]
         pub fn new(
-            inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
-            outputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>>,
+            inputs: Either<Set<Artifact<Input>>, Artifact<Input>>,
+            outputs: qjs::Opt<Either<Set<Artifact<Output>>, Artifact<Output>>>,
         ) -> Self {
             Self::new_(outputs, qjs::Opt(Some(inputs)))
         }
 
         #[quickjs(rename = "new")]
         pub fn new_(
-            outputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>>,
-            inputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>>,
+            outputs: qjs::Opt<Either<Set<Artifact<Output>>, Artifact<Output>>>,
+            inputs: qjs::Opt<Either<Set<Artifact<Input>>, Artifact<Input>>>,
         ) -> Self {
             let inputs = inputs
                 .0
-                .map(|inputs| {
-                    inputs.either(
-                        |inputs| inputs.into_iter().map(|input| input.0.clone()).collect(),
-                        |input| once(input.0.clone()).collect(),
-                    )
-                })
+                .map(|inputs| inputs.either(|inputs| inputs, |input| once(input).collect()))
                 .unwrap_or_default();
             let outputs = outputs
                 .0
                 .map(|outputs| {
                     outputs.either(
-                        |outputs| outputs.into_iter().map(|output| output.0.clone()).collect(),
-                        |output| once(output.0.clone()).collect(),
+                        |outputs| outputs.into_iter().collect(),
+                        |output| once(output).collect(),
                     )
                 })
                 .unwrap_or_default();
@@ -398,14 +388,8 @@ mod js {
         }
 
         #[quickjs(rename = "inputs", set)]
-        pub fn set_inputs(
-            &self,
-            inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
-        ) {
-            *self.0.inputs.write() = inputs.either(
-                |inputs| inputs.into_iter().map(|input| input.0.clone()).collect(),
-                |input| once(input.0.clone()).collect(),
-            );
+        pub fn set_inputs(&self, inputs: Either<Set<Artifact<Input>>, Artifact<Input>>) {
+            *self.0.inputs.write() = inputs.either(|inputs| inputs, |input| once(input).collect());
         }
 
         #[quickjs(get, enumerable)]
@@ -422,8 +406,8 @@ mod js {
     #[quickjs(rename = "FnRule", has_refs)]
     impl JsRule {
         pub fn new<'js>(
-            inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
-            outputs: Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>,
+            inputs: Either<Set<Artifact<Input>>, Artifact<Input>>,
+            outputs: Either<Set<Artifact<Output>>, Artifact<Output>>,
             function: qjs::Persistent<qjs::Function<'static>>,
             ctx: qjs::Ctx<'js>,
         ) -> Self {
@@ -438,26 +422,21 @@ mod js {
         #[quickjs(rename = "new")]
         pub fn new_<'js>(
             function: qjs::Persistent<qjs::Function<'static>>,
-            outputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Output>>>, AnyKind<&Artifact<Output>>>>,
-            inputs: qjs::Opt<Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>>,
+            outputs: qjs::Opt<Either<Set<Artifact<Output>>, Artifact<Output>>>,
+            inputs: qjs::Opt<Either<Set<Artifact<Input>>, Artifact<Input>>>,
             ctx: qjs::Ctx<'js>,
         ) -> Self {
             let context = qjs::Context::from_ctx(ctx).unwrap();
             let inputs = inputs
                 .0
-                .map(|inputs| {
-                    inputs.either(
-                        |inputs| inputs.into_iter().map(|input| input.0.clone()).collect(),
-                        |input| once(input.0.clone()).collect(),
-                    )
-                })
+                .map(|inputs| inputs.either(|inputs| inputs, |input| once(input).collect()))
                 .unwrap_or_default();
             let outputs = outputs
                 .0
                 .map(|outputs| {
                     outputs.either(
-                        |outputs| outputs.into_iter().map(|output| output.0.clone()).collect(),
-                        |output| once(output.0.clone()).collect(),
+                        |outputs| outputs.into_iter().collect(),
+                        |output| once(output).collect(),
                     )
                 })
                 .unwrap_or_default();
@@ -470,14 +449,8 @@ mod js {
         }
 
         #[quickjs(rename = "inputs", set)]
-        pub fn set_inputs(
-            &self,
-            inputs: Either<Vec<AnyKind<&Artifact<Input>>>, AnyKind<&Artifact<Input>>>,
-        ) {
-            *self.0.inputs.write() = inputs.either(
-                |inputs| inputs.into_iter().map(|input| input.0.clone()).collect(),
-                |input| once(input.0.clone()).collect(),
-            );
+        pub fn set_inputs(&self, inputs: Either<Set<Artifact<Input>>, Artifact<Input>>) {
+            *self.0.inputs.write() = inputs.either(|inputs| inputs, |input| once(input).collect());
         }
 
         #[quickjs(get, enumerable)]

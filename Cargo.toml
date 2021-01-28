@@ -30,6 +30,9 @@ version = "^0.4"
 [dependencies.pretty_env_logger]
 version = "^0.4"
 
+[dependencies.semver]
+version = "^0.8"
+
 [dependencies.serde]
 version = "^1"
 features = ["derive"]
@@ -61,6 +64,9 @@ version = "^0.3"
 
 [dependencies.weak-table]
 version = "^0.3"
+
+[dependencies.symbolic-demangle]
+version = "^8"
 
 [dependencies.nom]
 version = "^6"
@@ -124,12 +130,12 @@ features = ["exports", "loader", "either", "indexmap", "classes", "properties", 
 
 [features]
 default = [
-  "parallel",
+  #"parallel",
   "yaml",
   "toml",
   "fifo",
   "watch",
-  "webui",
+  #"webui",
   #"http-client",
 ]
 parallel = ["rquickjs/parallel"]

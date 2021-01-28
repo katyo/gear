@@ -1,9 +1,11 @@
+mod compiler;
 mod config;
-pub mod gcc;
+mod platform;
 mod utils;
 
+pub use compiler::*;
 pub use config::*;
-pub use gcc::GccConfig;
+pub use platform::*;
 pub use utils::*;
 
-pub use gcc::Js as GccJs;
+pub use compiler::Js as CompilerJs;

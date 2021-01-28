@@ -1,5 +1,6 @@
 /* -*- mode: js2 -*- */
-import tools from "./tools";
+import tools_v1 from "./tools_v1";
+import tools_v2 from "./tools_v2";
 import { remove, exec } from "system";
 
 export default async function({ root, base, dest }) {
@@ -26,6 +27,11 @@ export default async function({ root, base, dest }) {
     let build_bin = bin.goal("build", "Build executable");
 
     let config = {
+        tools: root.var("tools", "Tools version to use", {
+            type: "enum",
+            value: { type: "int", min: 1, max: 2 },
+            options: [1, 2],
+        }, 1),
         program: bin.var("program", "Program name", {
             type: "string",
             max: 16,
@@ -36,10 +42,11 @@ export default async function({ root, base, dest }) {
         }, [0, 0, 0]),
     };
 
-    console.log('' + config.program);
-    console.log('' + config.version);
+    //console.log('' + config.tools);
+    //console.log('' + config.program);
+    //console.log('' + config.version);
 
-    let {cc, ar, ld} = tools({obj_dir, lib_dir, bin_dir, inc_dirs: [inc_dir], cdefs: {
+    let {cc, ar, ld} = await (config.tools.value == 1 ? tools_v1 : tools_v2)({obj_dir, lib_dir, bin_dir, inc_dirs: [inc_dir], cdefs: {
         PROGRAM: `"${config.program.value}"`,
         VERSION: `{${config.version.value}}`,
     }});
@@ -47,7 +54,7 @@ export default async function({ root, base, dest }) {
     let lib_srcs = await [
         "hello.c",
         "bye.c",
-    ].map((src) => src_dir.input(src)).asyncAll;
+    ].map(src => src_dir.input(src)).asyncAll;
 
     let bin_srcs = await [
         "main.c"

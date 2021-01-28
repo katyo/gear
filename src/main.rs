@@ -190,6 +190,7 @@ impl State {
         let ctx = qjs::Context::full(&rt)?;
         let compile = qjs::Compile::new();
 
+        rt.set_max_stack_size(4 << 20);
         rt.set_loader(
             (
                 qjs::BuiltinResolver::default()
@@ -210,7 +211,7 @@ impl State {
                             gear::RuleJs,
                         ),
                     )
-                    .with_module("toolchain", gear::GccJs)
+                    .with_module("toolchain", gear::CompilerJs)
                     .with_module("system", gear::SystemJs),
                 qjs::ScriptLoader::default(),
             ),

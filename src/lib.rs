@@ -22,7 +22,7 @@ pub use rquickjs as qjs;
 pub use std::time::{Duration, SystemTime as Time};
 pub use weak_table::traits::{WeakElement, WeakKey};
 
-pub use artifact::{Actual, AnyKind, Artifact, ArtifactStore, Input, Output, Phony, WeakArtifact};
+pub use artifact::{Actual, Artifact, ArtifactStore, Input, Output, Phony, WeakArtifact};
 pub use directory::Directory;
 pub use hasher::DataHasher;
 pub use processor::RuleStateChange;
@@ -44,7 +44,7 @@ pub use rule::Js as RuleJs;
 pub use scope::Js as ScopeJs;
 pub use variable::Js as VariableJs;
 
-pub use compiler::GccJs;
+pub use compiler::CompilerJs;
 
 use fxhash::FxBuildHasher;
 use indexmap::{IndexMap, IndexSet};

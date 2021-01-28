@@ -2,7 +2,7 @@ use crate::system::{access, modified, AccessMode, Path};
 use crate::{
     qjs, Mut, Ref, Result, Rule, RuleState, Set, Time, Weak, WeakElement, WeakKey, WeakSet,
 };
-use derive_deref::{Deref, DerefMut};
+use derive_deref::Deref;
 use either::{Left, Right};
 use std::{
     borrow::Borrow,
@@ -14,7 +14,25 @@ use std::{
     marker::PhantomData,
 };
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, qjs::FromJs, qjs::IntoJs)]
+#[repr(u8)]
+pub enum ArtifactType {
+    Source,
+    Product,
+}
+
+impl Display for ArtifactType {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        match self {
+            Self::Source => "source",
+            Self::Product => "product",
+        }
+        .fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, qjs::FromJs, qjs::IntoJs)]
+#[repr(u8)]
 pub enum ArtifactKind {
     Actual,
     Phony,
@@ -33,9 +51,10 @@ impl Display for ArtifactKind {
 pub struct Internal {
     name: String,
     description: String,
-    kind: ArtifactKind,
-    time: Mut<Time>,
     rule: Mut<Option<Rule>>,
+    time: Mut<Time>,
+    type_: ArtifactType,
+    kind: ArtifactKind,
 }
 
 impl Drop for Internal {
@@ -71,24 +90,39 @@ impl Hash for Internal {
 }
 
 pub trait IsArtifactUsage {
-    const REUSABLE: bool;
+    const NAME: &'static str;
+    const TYPE: ArtifactType;
+
+    fn reusable<U, K>(artifact: &Artifact<U, K>) -> bool;
 }
 
 pub struct Input;
 
 impl IsArtifactUsage for Input {
-    const REUSABLE: bool = true;
+    const NAME: &'static str = "input";
+    const TYPE: ArtifactType = ArtifactType::Source;
+
+    fn reusable<U, K>(artifact: &Artifact<U, K>) -> bool {
+        true
+    }
 }
 
 pub struct Output;
 
 impl IsArtifactUsage for Output {
-    const REUSABLE: bool = false;
+    const NAME: &'static str = "output";
+    const TYPE: ArtifactType = ArtifactType::Product;
+
+    fn reusable<U, K>(artifact: &Artifact<U, K>) -> bool {
+        artifact.type_() != ArtifactType::Source && !artifact.has_rule()
+    }
 }
 
 pub trait IsArtifactKind {
+    const NAME: &'static str;
     const KIND: ArtifactKind;
-    fn set(store: &ArtifactStore) -> &Mut<WeakSet<WeakArtifact<(), Self>>>
+
+    fn get_store(store: &ArtifactStore) -> &Mut<WeakSet<WeakArtifact<(), Self>>>
     where
         Self: Sized;
 }
@@ -96,9 +130,10 @@ pub trait IsArtifactKind {
 pub struct Actual;
 
 impl IsArtifactKind for Actual {
+    const NAME: &'static str = "actual";
     const KIND: ArtifactKind = ArtifactKind::Actual;
 
-    fn set(store: &ArtifactStore) -> &Mut<WeakSet<WeakArtifact<(), Self>>> {
+    fn get_store(store: &ArtifactStore) -> &Mut<WeakSet<WeakArtifact<(), Self>>> {
         &store.actual
     }
 }
@@ -106,9 +141,10 @@ impl IsArtifactKind for Actual {
 pub struct Phony;
 
 impl IsArtifactKind for Phony {
+    const NAME: &'static str = "phony";
     const KIND: ArtifactKind = ArtifactKind::Phony;
 
-    fn set(store: &ArtifactStore) -> &Mut<WeakSet<WeakArtifact<(), Self>>> {
+    fn get_store(store: &ArtifactStore) -> &Mut<WeakSet<WeakArtifact<(), Self>>> {
         &store.phony
     }
 }
@@ -120,14 +156,11 @@ impl<U, K> Display for Artifact<U, K> {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         write!(
             f,
-            "Artifact(`{}`, {}, {})",
-            self.0.name,
-            self.0.kind,
-            if self.is_source() {
-                "source"
-            } else {
-                "product"
-            }
+            "Artifact(`{}`, {}, {}{})",
+            self.name(),
+            self.type_(),
+            self.kind(),
+            if self.has_rule() { ", rule" } else { "" }
         )
     }
 }
@@ -175,7 +208,7 @@ where
     U: IsArtifactUsage,
     K: IsArtifactKind,
 {
-    fn new_raw<N: Into<String>, D: Into<String>>(name: N, description: D) -> Self {
+    fn new_raw(name: impl Into<String>, description: impl Into<String>) -> Self {
         let name = name.into();
         let description = description.into();
         log::debug!("Artifact::new `{}`", name);
@@ -183,41 +216,103 @@ where
             Ref::new(Internal {
                 name,
                 description,
-                kind: K::KIND,
-                time: Mut::new(Time::UNIX_EPOCH),
                 rule: Default::default(),
+                time: Mut::new(Time::UNIX_EPOCH),
+                type_: U::TYPE,
+                kind: K::KIND,
             }),
             PhantomData,
         )
     }
 
-    pub fn new<A, N, D>(set: A, name: N, description: D) -> Result<Self>
-    where
-        A: AsRef<ArtifactStore>,
-        N: Into<String>,
-        D: Into<String>,
-    {
-        let set = K::set(set.as_ref());
+    pub fn new(
+        set: impl AsRef<ArtifactStore>,
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Result<Self> {
+        let set = K::get_store(set.as_ref());
         let name = name.into();
         let description = description.into();
         {
             // try reuse already existing artifact
             if let Some(artifact) = set.read().get(&name) {
-                return if U::REUSABLE {
-                    Ok(artifact.into_usage())
-                } else {
-                    Err(format!("Artifact `{}` already exists.", name).into())
-                };
+                return artifact.into_usage();
             }
         }
         let artifact = Self::new_raw(name, description);
-        set.write().insert(artifact.clone().into_usage());
+        set.write().insert(artifact.clone().into_usage_any());
         Ok(artifact)
     }
 }
 
+impl Artifact<Input, Actual> {
+    pub async fn new_init(
+        set: impl AsRef<ArtifactStore>,
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Result<Self> {
+        let artifact = Self::new(set, name.into(), description.into())?;
+        artifact.init().await?;
+        Ok(artifact)
+    }
+
+    pub async fn init(&self) -> Result<()> {
+        let path = Path::new(self.name());
+        if !access(path, AccessMode::READ).await {
+            return Err(format!("Unable to read input file `{}`", self.name()).into());
+        }
+        let time = modified(path).await?;
+        self.set_time(time);
+        Ok(())
+    }
+}
+
+impl Artifact<Output, Actual> {
+    pub async fn new_init(
+        set: impl AsRef<ArtifactStore>,
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Result<Self> {
+        let artifact = Self::new(set, name.into(), description.into())?;
+        artifact.init().await?;
+        Ok(artifact)
+    }
+
+    pub async fn init(&self) -> Result<()> {
+        let path = Path::new(self.name());
+        if path.exists().await {
+            if !access(path, AccessMode::WRITE).await {
+                return Err(format!("Unable to write output file `{}`", self.name()).into());
+            }
+            let time = modified(path).await?;
+            self.set_time(time);
+        }
+        Ok(())
+    }
+}
+
 impl<U, K> Artifact<U, K> {
-    pub fn into_usage<T>(self) -> Artifact<T, K> {
+    pub fn into_usage<T: IsArtifactUsage>(self) -> Result<Artifact<T, K>> {
+        if T::reusable(&self) {
+            Ok(Artifact(self.0, PhantomData))
+        } else {
+            Err(format!("Attempt to reuse {} as {}", self, T::NAME).into())
+        }
+    }
+
+    pub fn into_usage_any(self) -> Artifact<(), K> {
+        Artifact(self.0, PhantomData)
+    }
+
+    pub fn into_kind<T: IsArtifactKind>(self) -> Result<Artifact<U, T>> {
+        if T::KIND == self.0.kind {
+            Ok(Artifact(self.0, PhantomData))
+        } else {
+            Err(format!("Attempt to use {} as {}", self, T::KIND).into())
+        }
+    }
+
+    pub fn into_kind_any(self) -> Artifact<U, ()> {
         Artifact(self.0, PhantomData)
     }
 
@@ -233,64 +328,36 @@ impl<U, K> Artifact<U, K> {
         &self.0.description
     }
 
+    pub fn type_(&self) -> ArtifactType {
+        self.0.type_
+    }
+
+    pub fn kind(&self) -> ArtifactKind {
+        self.0.kind
+    }
+
     pub fn time(&self) -> Time {
         *self.0.time.read()
+    }
+
+    pub fn has_rule(&self) -> bool {
+        self.0.rule.read().is_some()
+    }
+
+    pub fn rule(&self) -> Option<Rule> {
+        self.0.rule.read().clone()
     }
 
     pub fn weak(&self) -> WeakArtifact<U, K> {
         WeakArtifact(Ref::downgrade(&self.0), PhantomData)
     }
-}
 
-impl<K> From<Artifact<Input, K>> for Artifact<(), K> {
-    fn from(artifact: Artifact<Input, K>) -> Self {
-        Artifact(artifact.0, PhantomData)
-    }
-}
-
-impl<K> From<Artifact<Output, K>> for Artifact<(), K> {
-    fn from(artifact: Artifact<Output, K>) -> Self {
-        Artifact(artifact.0, PhantomData)
-    }
-}
-
-impl<K> From<Artifact<(), K>> for Artifact<Input, K> {
-    fn from(artifact: Artifact<(), K>) -> Self {
-        Artifact(artifact.0, PhantomData)
-    }
-}
-
-impl<K> From<Artifact<Output, K>> for Artifact<Input, K> {
-    fn from(artifact: Artifact<Output, K>) -> Self {
-        Artifact(artifact.0, PhantomData)
-    }
-}
-
-impl<U, K> Artifact<U, K> {
-    pub fn into_kind<T: IsArtifactKind>(self) -> Result<Artifact<U, T>> {
-        if T::KIND == self.0.kind {
-            Ok(Artifact(self.0, PhantomData))
-        } else {
-            Err(format!(
-                "Required {} artifact but actual artifact `{}` is {}",
-                T::KIND,
-                self.0.name,
-                self.0.kind
-            )
-            .into())
-        }
-    }
-
-    pub fn into_kind_any(self) -> Artifact<U, ()> {
-        Artifact(self.0, PhantomData)
+    pub fn is_source(&self) -> bool {
+        self.type_() == ArtifactType::Source
     }
 
     pub fn is_phony(&self) -> bool {
-        self.0.kind == ArtifactKind::Phony
-    }
-
-    pub fn is_source(&self) -> bool {
-        self.0.rule.read().is_none()
+        self.kind() == ArtifactKind::Phony
     }
 
     pub fn inputs(&self) -> impl Iterator<Item = Artifact<Input>> {
@@ -318,31 +385,6 @@ impl<U, K> Artifact<U, K> {
 
     pub fn set_time(&self, time: Time) {
         *self.0.time.write() = time;
-    }
-
-    pub fn is_init(&self) -> bool {
-        self.time() > Time::UNIX_EPOCH
-    }
-
-    pub async fn init(&self) -> Result<()> {
-        if self.is_init() {
-            return Ok(());
-        }
-        let path = Path::new(self.name());
-        if self.is_source() {
-            if !access(path, AccessMode::READ).await {
-                return Err(format!("Unable to read input file `{}`", self.name()).into());
-            }
-        } else if path.exists().await {
-            if !access(path, AccessMode::WRITE).await {
-                return Err(format!("Unable to write output file `{}`", self.name()).into());
-            }
-        } else {
-            return Ok(());
-        }
-        let time = modified(path).await?;
-        self.set_time(time);
-        Ok(())
     }
 
     pub async fn update_time(&self, new_time: Option<Time>) -> Result<bool> {
@@ -418,10 +460,7 @@ impl<U, K> Artifact<U, K> {
         Ok(())
     }
 
-    pub fn process<F>(&self, schedule: &mut F) -> bool
-    where
-        F: FnMut(Rule),
-    {
+    pub fn process(&self, schedule: &mut impl FnMut(Rule)) -> bool {
         if self.is_source() {
             false
         } else if self
@@ -436,11 +475,7 @@ impl<U, K> Artifact<U, K> {
         }
     }
 
-    pub fn get_rule(&self) -> Option<Rule> {
-        self.0.rule.read().clone()
-    }
-
-    fn schedule_rule<F: FnMut(Rule)>(&self, schedule: &mut F) {
+    fn schedule_rule(&self, schedule: &mut impl FnMut(Rule)) {
         if let Some(rule) = &*self.0.rule.read() {
             log::trace!("Schedule rule for `{}`", self.name());
             schedule(rule.clone());
@@ -448,54 +483,38 @@ impl<U, K> Artifact<U, K> {
     }
 }
 
-impl<K> Artifact<Output, K> {
-    pub fn rule(&self) -> Option<Rule> {
-        self.0.rule.read().clone()
+impl<K> From<Artifact<Input, K>> for Artifact<(), K> {
+    fn from(artifact: Artifact<Input, K>) -> Self {
+        Artifact(artifact.0, PhantomData)
     }
+}
 
+impl<K> From<Artifact<Output, K>> for Artifact<(), K> {
+    fn from(artifact: Artifact<Output, K>) -> Self {
+        Artifact(artifact.0, PhantomData)
+    }
+}
+
+impl<K> From<Artifact<(), K>> for Artifact<Input, K> {
+    fn from(artifact: Artifact<(), K>) -> Self {
+        Artifact(artifact.0, PhantomData)
+    }
+}
+
+impl<K> From<Artifact<Output, K>> for Artifact<Input, K> {
+    fn from(artifact: Artifact<Output, K>) -> Self {
+        Artifact(artifact.0, PhantomData)
+    }
+}
+
+impl<K> Artifact<Output, K> {
     pub fn input(&self) -> Artifact<Input, K> {
         Artifact(self.0.clone(), PhantomData)
     }
 
-    pub fn has_rule(&self) -> bool {
-        self.0.rule.read().is_some()
+    pub fn set_rule(&self, rule: impl Into<Rule>) {
+        *self.0.rule.write() = Some(rule.into());
     }
-
-    pub fn set_rule(&self, rule: Rule) {
-        *self.0.rule.write() = Some(rule);
-    }
-}
-
-#[derive(Clone, Deref, DerefMut)]
-pub struct AnyKind<A>(pub A);
-
-macro_rules! any_kind {
-	  ($($usage:ident $($kind:ident)*;)*) => {
-		    $(
-            impl<'js> qjs::FromJs<'js> for AnyKind<&'js Artifact<$usage>> {
-                fn from_js(ctx: qjs::Ctx<'js>, val: qjs::Value<'js>) -> qjs::Result<Self> {
-                    <&Artifact<$usage>>::from_js(ctx, val.clone())
-                        .map(AnyKind)
-                        $(
-                            .or_else(|error| {
-                                if error.is_from_js() {
-                                    <&Artifact<$usage, $kind>>::from_js(ctx, val.clone()).map(|this| {
-                                    AnyKind(unsafe { &*(this as *const Artifact<$usage, $kind> as *const _) })
-                                    })
-                                } else {
-                                    Err(error)
-                                }
-                            })
-                        )*
-                }
-            }
-        )*
-	  };
-}
-
-any_kind! {
-    Input Actual Phony;
-    Output Actual Phony;
 }
 
 #[derive(Clone)]
@@ -562,7 +581,7 @@ impl ArtifactStore {
                     .read()
                     .iter()
                     .filter(|artifact| matcher(artifact.name()))
-                    .map(|a| a.into_kind_any().into_usage())
+                    .map(|a| a.into_kind_any().into_usage::<Input>().unwrap())
                     .collect(),
             )
             .collect()
@@ -600,130 +619,86 @@ impl AsRef<ArtifactStore> for ArtifactStore {
     }
 }
 
+impl<'js, U: IsArtifactUsage> qjs::FromJs<'js> for Artifact<U> {
+    fn from_js(ctx: qjs::Ctx<'js>, val: qjs::Value<'js>) -> qjs::Result<Self> {
+        let artifact: Artifact = qjs::FromJs::from_js(ctx, val)?;
+
+        if U::reusable(&artifact) {
+            Ok(Artifact(artifact.0, PhantomData))
+        } else {
+            Err(qjs::Error::new_from_js("artifact", U::NAME))
+        }
+    }
+}
+
+impl<'js, K: IsArtifactKind> qjs::FromJs<'js> for Artifact<(), K> {
+    fn from_js(ctx: qjs::Ctx<'js>, val: qjs::Value<'js>) -> qjs::Result<Self> {
+        let artifact: Artifact = qjs::FromJs::from_js(ctx, val)?;
+
+        if K::KIND == artifact.kind() {
+            Ok(Artifact(artifact.0, PhantomData))
+        } else {
+            Err(qjs::Error::new_from_js("artifact", K::NAME))
+        }
+    }
+}
+
+impl<'js, U: IsArtifactUsage, K: IsArtifactKind> qjs::FromJs<'js> for Artifact<U, K> {
+    fn from_js(ctx: qjs::Ctx<'js>, val: qjs::Value<'js>) -> qjs::Result<Self> {
+        let artifact: Artifact<U> = qjs::FromJs::from_js(ctx, val)?;
+
+        if K::KIND == artifact.kind() {
+            Ok(Artifact(artifact.0, PhantomData))
+        } else {
+            Err(qjs::Error::new_from_js("artifact", K::NAME))
+        }
+    }
+}
+
+impl<'js, U: IsArtifactUsage> qjs::IntoJs<'js> for Artifact<U> {
+    fn into_js(self, ctx: qjs::Ctx<'js>) -> qjs::Result<qjs::Value<'js>> {
+        self.into_usage_any().into_js(ctx)
+    }
+}
+
+impl<'js, K: IsArtifactKind> qjs::IntoJs<'js> for Artifact<(), K> {
+    fn into_js(self, ctx: qjs::Ctx<'js>) -> qjs::Result<qjs::Value<'js>> {
+        self.into_kind_any().into_js(ctx)
+    }
+}
+
+impl<'js, U: IsArtifactUsage, K: IsArtifactKind> qjs::IntoJs<'js> for Artifact<U, K> {
+    fn into_js(self, ctx: qjs::Ctx<'js>) -> qjs::Result<qjs::Value<'js>> {
+        self.into_kind_any().into_usage_any().into_js(ctx)
+    }
+}
+
 #[qjs::bind(module, public)]
 #[quickjs(bare)]
 mod js {
     pub use super::*;
 
-    pub type GenericInput = Artifact<Input>;
+    pub type AnyArtifact = Artifact;
 
-    impl GenericInput {
+    #[quickjs(rename = "Artifact", cloneable)]
+    impl AnyArtifact {
         #[quickjs(rename = "new", hide)]
         pub fn ctor() -> Self {}
 
         #[quickjs(get, enumerable, hide)]
         pub fn name(&self) -> &String {}
 
-        #[quickjs(get, enumerable, hide)]
-        pub fn description(&self) -> String {}
-
-        #[quickjs(rename = "toString")]
-        pub fn to_string_js(&self) -> String {
-            self.to_string()
-        }
-    }
-
-    pub type GenericOutput = Artifact<Output>;
-
-    impl GenericOutput {
-        #[quickjs(rename = "new", hide)]
-        pub fn ctor() -> Self {}
+        #[quickjs(get, enumerable, hide, rename = "type")]
+        pub fn type_(&self) -> ArtifactType {}
 
         #[quickjs(get, enumerable, hide)]
-        pub fn name(&self) -> &String {}
+        pub fn kind(&self) -> ArtifactKind {}
 
         #[quickjs(get, enumerable, hide)]
         pub fn description(&self) -> &String {}
 
         #[quickjs(get, enumerable, hide)]
         pub fn rule(&self) -> Option<Rule> {}
-
-        #[quickjs(get, enumerable, hide)]
-        pub fn input(&self) -> Artifact<Input> {}
-
-        #[quickjs(rename = "toString")]
-        pub fn to_string_js(&self) -> String {
-            self.to_string()
-        }
-    }
-
-    pub type ActualInput = Artifact<Input, Actual>;
-
-    impl ActualInput {
-        #[quickjs(rename = "new", hide)]
-        pub fn ctor() -> Self {}
-
-        #[quickjs(get, enumerable, hide)]
-        pub fn name(&self) -> &String {}
-
-        #[quickjs(get, enumerable, hide)]
-        pub fn description(&self) -> &String {}
-
-        #[quickjs(rename = "toString")]
-        pub fn to_string_js(&self) -> String {
-            self.to_string()
-        }
-    }
-
-    pub type ActualOutput = Artifact<Output, Actual>;
-
-    impl ActualOutput {
-        #[quickjs(rename = "new", hide)]
-        pub fn ctor() -> Self {}
-
-        #[quickjs(get, enumerable, hide)]
-        pub fn name(&self) -> &String {}
-
-        #[quickjs(get, enumerable, hide)]
-        pub fn description(&self) -> &String {}
-
-        #[quickjs(get, enumerable, hide)]
-        pub fn rule(&self) -> Option<Rule> {}
-
-        #[quickjs(get, enumerable, hide)]
-        pub fn input(&self) -> Artifact<Input, Actual> {}
-
-        #[quickjs(rename = "toString")]
-        pub fn to_string_js(&self) -> String {
-            self.to_string()
-        }
-    }
-
-    pub type PhonyInput = Artifact<Input, Phony>;
-
-    impl PhonyInput {
-        #[quickjs(rename = "new", hide)]
-        pub fn ctor() -> Self {}
-
-        #[quickjs(get, enumerable, hide)]
-        pub fn name(&self) -> &String {}
-
-        #[quickjs(get, enumerable, hide)]
-        pub fn description(&self) -> &String {}
-
-        #[quickjs(rename = "toString")]
-        pub fn to_string_js(&self) -> String {
-            self.to_string()
-        }
-    }
-
-    pub type PhonyOutput = Artifact<Output, Phony>;
-
-    impl PhonyOutput {
-        #[quickjs(rename = "new", hide)]
-        pub fn ctor() -> Self {}
-
-        #[quickjs(get, enumerable, hide)]
-        pub fn name(&self) -> &String {}
-
-        #[quickjs(get, enumerable, hide)]
-        pub fn description(&self) -> &String {}
-
-        #[quickjs(get, enumerable, hide)]
-        pub fn rule(&self) -> Option<Rule> {}
-
-        #[quickjs(get, enumerable, hide)]
-        pub fn input(&self) -> Artifact<Input, Phony> {}
 
         #[quickjs(rename = "toString")]
         pub fn to_string_js(&self) -> String {

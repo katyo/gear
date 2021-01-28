@@ -1,4 +1,6 @@
 mod deps_parser;
+mod ld_script;
+mod size_parser;
 
 use crate::{
     system::{read_file, Path},
@@ -7,7 +9,9 @@ use crate::{
 use futures::future::join_all;
 use std::str::from_utf8;
 
-use deps_parser::parse_deps;
+pub use deps_parser::DepsInfo;
+pub use ld_script::LdScript;
+pub use size_parser::SizeInfo;
 
 impl ArtifactStore {
     pub async fn read_deps(
@@ -17,15 +21,13 @@ impl ArtifactStore {
     ) -> Result<Set<Artifact<Input, Actual>>> {
         let data = read_file(path).await?;
         let data = from_utf8(&data)?;
-        let (_obj, deps) = parse_deps(&data)?;
-        let deps = join_all(deps.into_iter().filter(filter).map(|path| {
-            let store = self.clone();
-            async move {
-                let artifact = Artifact::new(store, path, "")?;
-                artifact.init().await?;
-                Ok(artifact)
-            }
-        }))
+        let info: DepsInfo = data.parse()?;
+        let deps = join_all(
+            info.deps
+                .into_iter()
+                .filter(filter)
+                .map(|path| Artifact::<Input, Actual>::new_init(self.clone(), path, "")),
+        )
         .await
         .into_iter()
         .collect::<Result<_>>()?;

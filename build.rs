@@ -1,4 +1,15 @@
 fn main() {
+    {
+        // build info
+        use std::env;
+
+        let target = env::var("TARGET").unwrap();
+        let profile = env::var("PROFILE").unwrap();
+
+        println!("cargo:rustc-env=BUILD_TARGET={}", target);
+        println!("cargo:rustc-env=BUILD_PROFILE={}", profile);
+    }
+
     if cfg!(feature = "webui") {
         let status = std::process::Command::new("npm")
             .args(&["run", "build"])

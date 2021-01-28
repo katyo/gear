@@ -1,4 +1,4 @@
-use base64::{encode_config_buf, URL_SAFE};
+use base64::{encode_config_buf, URL_SAFE_NO_PAD as ENCODE_PRESET};
 use blake3::Hasher as State;
 use std::hash::{Hash, Hasher};
 
@@ -53,7 +53,7 @@ impl DataHasher {
     }
 
     pub fn finish_base64_to_string(&self, out: &mut String) {
-        encode_config_buf(self.state.finalize().as_bytes(), URL_SAFE, out);
+        encode_config_buf(self.state.finalize().as_bytes(), ENCODE_PRESET, out);
     }
 
     pub fn hash_binary_vec<T: Hash>(val: &T) -> Vec<u8> {
