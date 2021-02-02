@@ -13,6 +13,32 @@ pub use std::{
 #[cfg(feature = "parallel")]
 pub use std::sync::{Arc as Ref, RwLockReadGuard as ReadRef, RwLockWriteGuard as WriteRef, Weak};
 
+/// The marker trait which requires [`Send`] when `"parallel"` feature is used
+#[cfg(not(feature = "parallel"))]
+pub trait ParallelSend {}
+
+#[cfg(feature = "parallel")]
+pub trait ParallelSend: Send {}
+
+#[cfg(not(feature = "parallel"))]
+impl<T> ParallelSend for T {}
+
+#[cfg(feature = "parallel")]
+impl<T: Send> ParallelSend for T {}
+
+/// The marker trait which requires [`Sync`] when `"parallel"` feature is used
+#[cfg(not(feature = "parallel"))]
+pub trait ParallelSync {}
+
+#[cfg(feature = "parallel")]
+pub trait ParallelSync: Sync {}
+
+#[cfg(not(feature = "parallel"))]
+impl<T> ParallelSync for T {}
+
+#[cfg(feature = "parallel")]
+impl<T: Sync> ParallelSync for T {}
+
 #[repr(transparent)]
 pub struct Mut<T: ?Sized>(RefCell<T>);
 

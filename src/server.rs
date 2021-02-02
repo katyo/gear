@@ -107,13 +107,13 @@ impl Server {
             .phony
             .read()
             .iter()
-            .filter_map(|artifact| artifact.get_rule())
+            .filter_map(|artifact| artifact.rule())
             .chain(
                 store
                     .actual
                     .read()
                     .iter()
-                    .filter_map(|artifact| artifact.get_rule()),
+                    .filter_map(|artifact| artifact.rule()),
             )
             .collect::<gear::Set<_>>();
 

@@ -1,7 +1,8 @@
 use crate::{
     qjs,
     system::{create_dir_all, Path},
-    Artifact, Input, Mut, Output, Ref, Result, Set, Time, WeakArtifact, WeakSet,
+    Artifact, Input, Mut, Output, ParallelSend, ParallelSync, Ref, Result, Set, Time, WeakArtifact,
+    WeakSet,
 };
 use derive_deref::Deref;
 use either::Either;
@@ -45,7 +46,7 @@ impl Display for RuleState {
 }
 
 /// The builder interface
-pub trait RuleApi: qjs::SendWhenParallel {
+pub trait RuleApi: ParallelSend + ParallelSync {
     /// Get the list of inputs
     fn inputs(&self) -> Vec<Artifact<Input>>;
 
@@ -199,7 +200,9 @@ pub struct JsInternal {
     context: qjs::Context,
 }
 
+#[cfg(feature = "parallel")]
 unsafe impl Send for JsInternal {}
+#[cfg(feature = "parallel")]
 unsafe impl Sync for JsInternal {}
 
 impl Drop for JsInternal {

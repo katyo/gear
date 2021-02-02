@@ -148,7 +148,7 @@ impl TempFile {
         };
 
         #[cfg(unix)]
-        let pipe = if pipe {
+        if pipe {
             let path_str = path.as_os_str();
             if let Err(error) = nix::unistd::mkfifo(path_str, nix::sys::stat::Mode::S_IRWXU) {
                 log::error!(
@@ -156,13 +156,8 @@ impl TempFile {
                     path.display(),
                     error
                 );
-                false
-            } else {
-                true
             }
-        } else {
-            false
-        };
+        }
 
         Ok(Self { path })
     }

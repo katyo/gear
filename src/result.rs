@@ -79,7 +79,7 @@ from_impls! {
 impl From<Error> for JsError {
     fn from(error: Error) -> JsError {
         match error {
-            Error::Io(error) => JsError::IO(error),
+            Error::Io(error) => JsError::Io(error),
             Error::Nul(error) => JsError::InvalidString(error),
             Error::Utf8(error) => JsError::Utf8(error),
             Error::Val(error) => JsError::Exception {

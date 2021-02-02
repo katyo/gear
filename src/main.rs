@@ -211,13 +211,13 @@ impl State {
                             gear::RuleJs,
                         ),
                     )
-                    .with_module("toolchain", gear::CompilerJs)
+                    .with_module("toolchain", (gear::CompilerJs, gear::SymbolsJs))
                     .with_module("system", gear::SystemJs),
                 qjs::ScriptLoader::default(),
             ),
         );
 
-        rt.spawn_executor::<qjs::AsyncStd>();
+        rt.spawn_executor(qjs::AsyncStd);
 
         ctx.with(|ctx| -> Result<()> {
             let globals = ctx.globals();

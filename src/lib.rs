@@ -44,7 +44,7 @@ pub use rule::Js as RuleJs;
 pub use scope::Js as ScopeJs;
 pub use variable::Js as VariableJs;
 
-pub use compiler::CompilerJs;
+pub use compiler::{CompilerJs, SymbolInfo, SymbolsJs};
 
 use fxhash::FxBuildHasher;
 use indexmap::{IndexMap, IndexSet};

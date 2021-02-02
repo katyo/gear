@@ -11,7 +11,7 @@ use std::{
 pub struct SemVer(Version);
 
 impl<'js> qjs::FromJs<'js> for SemVer {
-    fn from_js(ctx: qjs::Ctx<'js>, val: qjs::Value<'js>) -> qjs::Result<Self> {
+    fn from_js(_ctx: qjs::Ctx<'js>, val: qjs::Value<'js>) -> qjs::Result<Self> {
         Ok(Self(match val.type_of() {
             qjs::Type::Int => {
                 let m: u64 = val.get()?;
