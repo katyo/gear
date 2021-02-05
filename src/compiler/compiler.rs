@@ -1,14 +1,15 @@
 use super::{
-    DetectOpts, FileKind, FormatArgs, LdScript, PlatformKind, SemVer, SizeInfo, ToolchainOpts,
+    CInputKind, COutputKind, CompilerKind, DCompilerKind, DepKind, DetectOpts, FileKind,
+    FormatArgs, LdScript, PlatformKind, SizeInfo, ToolchainOpts,
 };
 use crate::{
     qjs,
-    system::{check_access, exec_out, write_file, AccessMode, Path, PathBuf},
-    Actual, Artifact, ArtifactStore, DataHasher, Directory, Error, Input, Mut, Output, Ref, Result,
-    Rule, RuleApi, Set, WeakArtifact,
+    system::{check_access, exec_out, which_any, write_file, AccessMode, Path, PathBuf},
+    Actual, Artifact, ArtifactStore, BoxedFuture, DataHasher, Diagnostics, Directory, Input, Mut,
+    Output, Ref, Result, Rule, RuleApi, Set, WeakArtifact,
 };
-use futures::future::join_all;
-use std::{future::Future, iter::once, pin::Pin, result::Result as StdResult, str::FromStr};
+use futures::future::{join_all, FutureExt};
+use std::iter::once;
 
 macro_rules! log_out {
     ($res:ident) => {
@@ -33,32 +34,19 @@ macro_rules! log_out {
     };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, qjs::FromJs, qjs::IntoJs)]
-#[quickjs(untagged, rename_all = "lowercase")]
-pub enum CompilerKind {
-    Gcc,
-    Llvm,
-}
-
-impl FromStr for CompilerKind {
-    type Err = Error;
-
-    fn from_str(name: &str) -> Result<Self> {
-        if name.ends_with("gcc") || name.ends_with("g++") {
-            Ok(Self::Gcc)
-        } else if name.ends_with("clang") || name.ends_with("clang++") {
-            Ok(Self::Llvm)
-        } else {
-            Err(format!("Unsupported compiler: {}", name).into())
-        }
-    }
-}
-
+#[derive(Hash)]
 struct PropsInternal {
+    /// C compiler path
     cc: String,
+    /// D compiler path
+    dc: Option<String>,
+    /// Archiver path
     ar: String,
+    /// Binutil nm path
     nm: String,
+    /// Binutil size path
     size: String,
+    /// Binutil strip path
     strip: String,
     objcopy: String,
     objdump: String,
@@ -73,9 +61,9 @@ struct PropsInternal {
 impl PropsInternal {
     async fn new(opts: DetectOpts) -> Result<Self> {
         let path = &opts.compiler;
-        let kind = CompilerKind::from_str(path)?;
+        let kind: CompilerKind = path.parse()?;
 
-        let (version, target, ar, nm, size, strip, objcopy, objdump, readelf) = match kind {
+        let (version, target, tools, dc) = match kind {
             CompilerKind::Gcc => {
                 let mut version = exec_out(path, &["-dumpversion"]).await?.success()?.out;
                 version.retain(|c| c != '\n');
@@ -87,24 +75,40 @@ impl PropsInternal {
 
                 log::debug!("gcc target: {}", target);
 
-                let pre_path = path.strip_suffix("gcc").ok_or_else(|| {
-                    format!(
-                        "Invalid GCC compiler path: `{}`. It should ends with gcc",
-                        path
-                    )
-                })?;
+                async fn find_tool(path: &str, target: &str, name: &str) -> Result<String> {
+                    let pre_path = &path[..path.len() - 3];
+                    let path0 = format!("{}{}", pre_path, name);
+                    let path1 = format!("{}-{}", target, name);
+                    let paths = [path0.as_str(), path1.as_str(), name];
 
-                let ar = format!("{}-ar", path);
-                let nm = format!("{}-nm", path);
-                let size = format!("{}size", pre_path);
-                let strip = format!("{}strip", pre_path);
-                let objcopy = format!("{}objcopy", pre_path);
-                let objdump = format!("{}objdump", pre_path);
-                let readelf = format!("{}readelf", pre_path);
+                    let path = which_any(if pre_path.ends_with("-") {
+                        &paths[..2]
+                    } else {
+                        &paths[..]
+                    })
+                    .await
+                    .ok_or_else(|| format!("Unable to find `{}`", name))?;
+                    check_access(&path, AccessMode::EXECUTE).await?;
+                    Ok(path.display().to_string())
+                }
 
-                (
-                    version, target, ar, nm, size, strip, objcopy, objdump, readelf,
+                let tools = join_all(
+                    [
+                        "gcc-ar", "gcc-nm", "size", "strip", "objcopy", "objdump", "readelf",
+                    ]
+                    .iter()
+                    .map(|name| find_tool(&path, &target, name)),
                 )
+                .await;
+
+                let gdc = find_tool(&path, &target, "gdc")
+                    .await
+                    .map_err(|error| {
+                        log::warn!("{}", error);
+                    })
+                    .ok();
+
+                (version, target, tools, gdc)
             }
             CompilerKind::Llvm => {
                 let target = if opts.target.is_empty() {
@@ -153,10 +157,11 @@ impl PropsInternal {
                         .success()?
                         .out;
                     path.retain(|c| c != '\n');
+                    check_access(&path, AccessMode::EXECUTE).await?;
                     Ok(path)
                 }
 
-                let mut paths = join_all(
+                let tools = join_all(
                     [
                         "llvm-ar",
                         "llvm-nm",
@@ -169,38 +174,34 @@ impl PropsInternal {
                     .iter()
                     .map(|name| find_tool(path, name)),
                 )
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>>>()?
-                .into_iter();
+                .await;
 
-                let ar = paths.next().unwrap();
-                let nm = paths.next().unwrap();
-                let size = paths.next().unwrap();
-                let strip = paths.next().unwrap();
-                let objcopy = paths.next().unwrap();
-                let objdump = paths.next().unwrap();
-                let readelf = paths.next().unwrap();
+                let ldc = find_tool(&path, "ldc2")
+                    .await
+                    .map_err(|error| {
+                        log::warn!("{}", error);
+                    })
+                    .ok();
 
-                (
-                    version, target, ar, nm, size, strip, objcopy, objdump, readelf,
-                )
+                (version, target, tools, ldc)
             }
         };
 
-        join_all(
-            [&ar, &nm, &size, &strip, &objcopy, &objdump, &readelf]
-                .iter()
-                .map(|path| check_access(path, AccessMode::EXECUTE)),
-        )
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>>>()?;
+        let mut paths = tools.into_iter().collect::<Result<Vec<_>>>()?.into_iter();
+
+        let ar = paths.next().unwrap();
+        let nm = paths.next().unwrap();
+        let size = paths.next().unwrap();
+        let strip = paths.next().unwrap();
+        let objcopy = paths.next().unwrap();
+        let objdump = paths.next().unwrap();
+        let readelf = paths.next().unwrap();
 
         let platform = PlatformKind::from_target(&target)?;
 
         Ok(Self {
             cc: opts.compiler.clone(),
+            dc,
             ar,
             nm,
             size,
@@ -220,35 +221,88 @@ impl PropsInternal {
 #[derive(Clone)]
 pub struct CompilerConfig(Ref<Internal>);
 
+impl CompilerConfig {
+    pub fn hash(&self) -> String {
+        DataHasher::hash_base64_string(&(&self.0.props, &self.0.opts))
+    }
+
+    pub fn base_opts(&self) -> Vec<String> {
+        let mut out = Vec::default();
+        self.0.opts.base.fmt_args(&mut out);
+        out
+    }
+
+    pub fn c_opts(&self) -> Vec<String> {
+        let mut out = Vec::default();
+        (&self.0.opts.base, &self.0.opts.cc, &self.0.opts.c).fmt_args(&mut out);
+        out
+    }
+
+    pub fn cxx_opts(&self) -> Vec<String> {
+        let mut out = Vec::default();
+        (&self.0.opts.base, &self.0.opts.cc, &self.0.opts.cxx).fmt_args(&mut out);
+        out
+    }
+
+    pub fn d_opts(&self) -> Vec<String> {
+        let mut out = Vec::default();
+        (self.0.props.kind, &self.0.opts.base, &self.0.opts.d).fmt_args(&mut out);
+        out
+    }
+
+    pub fn link_opts(&self) -> Vec<String> {
+        let mut out = Vec::default();
+        (&self.0.opts.base, &self.0.opts.link).fmt_args(&mut out);
+        out
+    }
+
+    pub fn dump_opts(&self) -> Vec<String> {
+        let mut out = Vec::default();
+        self.0.opts.dump.fmt_args(&mut out);
+        out
+    }
+
+    pub fn strip_opts(&self) -> Vec<String> {
+        let mut out = Vec::default();
+        self.0.opts.strip.fmt_args(&mut out);
+        out
+    }
+}
+
 #[derive(Clone)]
 pub(self) struct Internal {
     props: Ref<PropsInternal>,
     opts: ToolchainOpts,
-    compile_opts: Vec<String>,
-    compile_hash: String,
-    link_opts: Vec<String>,
-    dump_opts: Vec<String>,
-    strip_opts: Vec<String>,
 }
 
 impl Internal {
     pub async fn detect(opts: DetectOpts) -> Result<Self> {
         let props = PropsInternal::new(opts).await?;
 
-        let compile_opts = Vec::<String>::default();
-        let compile_hash = DataHasher::hash_base64_string(&compile_opts);
-        let link_opts = Default::default();
-        let dump_opts = Default::default();
-        let strip_opts = Default::default();
+        /*let diag_opts: &[&str] = match props.kind {
+            CompilerKind::Gcc => &[
+                //"-fno-diagnostics-show-caret",
+                //"-fno-diagnostics-color",
+                //"-fdiagnostics-show-option",
+                "-fdiagnostics-parseable-fixits",
+            ],
+            CompilerKind::Llvm => &[
+                //"-fdiagnostics-format=clang",
+                //"-fdiagnostics-print-source-range-info",
+                //"-fno-caret-diagnostics",
+                //"-fno-color-diagnostics",
+                //"-fdiagnostics-show-option",
+                "-fdiagnostics-parseable-fixits",
+            ],
+        };
+
+        for opts in &[&mut compile_opts, &mut link_opts] {
+            opts.extend(diag_opts);
+        }*/
 
         Ok(Self {
             props: Ref::new(props),
             opts: Default::default(),
-            compile_opts,
-            compile_hash,
-            link_opts,
-            dump_opts,
-            strip_opts,
         })
     }
 
@@ -256,46 +310,24 @@ impl Internal {
         let mut opts = self.opts.clone();
         opts.extend(Some(new_opts));
 
-        let mut compile_opts = Vec::default();
-        if self.props.kind == CompilerKind::Llvm {
-            compile_opts.push("-target".into());
-            compile_opts.push(self.props.target.clone());
-        }
-        opts.common.fmt_args(&mut compile_opts);
-        opts.compile.fmt_args(&mut compile_opts);
-
-        let compile_hash = DataHasher::hash_base64_string(&compile_opts);
-
-        let mut link_opts = Vec::default();
-        if self.props.kind == CompilerKind::Llvm {
-            link_opts.push("-target".into());
-            link_opts.push(self.props.target.clone());
-        }
-        opts.common.fmt_args(&mut link_opts);
-        opts.link.fmt_args(&mut link_opts);
-
-        let mut dump_opts = Vec::default();
-        opts.dump.fmt_args(&mut dump_opts);
-
-        let mut strip_opts = Vec::default();
-        opts.strip.fmt_args(&mut strip_opts);
-
         Self {
             props: self.props.clone(),
             opts,
-            compile_opts,
-            compile_hash,
-            link_opts,
-            dump_opts,
-            strip_opts,
         }
     }
+}
+
+#[derive(Debug, Clone, qjs::FromJs, Default)]
+pub struct CompileOptions {
+    pub input: Option<CInputKind>,
+    pub output: COutputKind,
 }
 
 pub(self) struct CompileInternal {
     cfg: CompilerConfig,
     store: ArtifactStore,
-    args: Vec<String>,
+    in_kind: CInputKind,
+    out_kind: COutputKind,
     src: Artifact<Input, Actual>,
     dep: PathBuf,
     incs: Mut<Set<Artifact<Input, Actual>>>,
@@ -324,13 +356,98 @@ impl RuleApi for CompileInternal {
             .collect()
     }
 
-    fn invoke(self: Ref<Self>) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-        Box::pin(async move {
+    fn invoke(self: Ref<Self>) -> BoxedFuture<Result<Diagnostics>> {
+        async move {
             log::debug!("Compile::invoke");
-            if self.dst.try_ref().is_some() {
-                let res = exec_out(&self.cfg.0.props.cc, &self.args).await?;
+            Ok(if let Some(dst) = self.dst.try_ref() {
+                let deps_name = self.dep.display().to_string();
+                let src = &self.src;
+                let mut dep_kind = DepKind::default();
+
+                let (cmd, args) = if self.in_kind == CInputKind::D {
+                    let mut args = self.cfg.d_opts();
+
+                    match DCompilerKind::from(self.cfg.0.props.kind) {
+                        DCompilerKind::Gdc => {
+                            args.push(
+                                match self.out_kind {
+                                    COutputKind::Asm => "-S",
+                                    COutputKind::Obj => "-c",
+                                    _ => unreachable!(),
+                                }
+                                .into(),
+                            );
+                            args.push("-MMD".into());
+                            args.push("-MF".into());
+                            args.push(deps_name);
+                            args.push("-o".into());
+                            args.push(dst.name().clone());
+                            args.push(src.name().clone());
+                        }
+                        DCompilerKind::Ldc => {
+                            args.push("--verror-style=gnu".into());
+                            args.push(format!("--mtriple={}", self.cfg.0.props.target));
+                            args.push(format!(
+                                "--output-{}",
+                                match self.out_kind {
+                                    COutputKind::Asm => "s",
+                                    COutputKind::Obj => "o",
+                                    COutputKind::Ir => "ll",
+                                    COutputKind::Bc => "bc",
+                                    _ => unreachable!(),
+                                }
+                            ));
+                            args.push(format!("--deps={}", deps_name));
+                            dep_kind = DepKind::D;
+                            args.push("--op".into());
+                            args.push(format!("--of={}", dst.name()));
+                            args.push(src.name().clone());
+                        }
+                    }
+
+                    (self.cfg.0.props.dc.as_ref().unwrap(), args)
+                } else {
+                    fn with_lang(lang: &str, mut args: Vec<String>) -> Vec<String> {
+                        args.push(format!("-x{}", lang));
+                        args
+                    }
+
+                    let mut args = match self.in_kind {
+                        CInputKind::C => with_lang("c", self.cfg.c_opts()),
+                        CInputKind::Asm => with_lang("assembler-with-cpp", self.cfg.c_opts()),
+                        CInputKind::Cxx => with_lang("c++", self.cfg.cxx_opts()),
+                        _ => unreachable!(),
+                    };
+
+                    if matches!(self.cfg.0.props.kind, CompilerKind::Llvm) {
+                        args.push(format!("--target={}", self.cfg.0.props.target));
+
+                        if matches!(self.out_kind, COutputKind::Ir | COutputKind::Bc) {
+                            args.push("--emit-llvm".into());
+                        }
+                    }
+
+                    args.push(
+                        match self.out_kind {
+                            COutputKind::Cpp => "-E",
+                            COutputKind::Asm | COutputKind::Ir => "-S",
+                            COutputKind::Obj | COutputKind::Bc => "-c",
+                        }
+                        .into(),
+                    );
+
+                    args.push("-MMD".into());
+                    args.push("-MF".into());
+                    args.push(deps_name);
+                    args.push("-o".into());
+                    args.push(dst.name().clone());
+                    args.push(src.name().clone());
+
+                    (&self.cfg.0.props.cc, args)
+                };
+
+                let res = exec_out(cmd, &args).await?;
                 log_out!(res);
-                res.success()?;
 
                 let dep_path = &self.dep;
                 if dep_path.is_file().await {
@@ -338,23 +455,53 @@ impl RuleApi for CompileInternal {
                     // reload generated deps
                     let incs = self
                         .store
-                        .read_deps(dep_path, |src| src != src_name)
+                        .read_deps(dep_path, dep_kind, |src| src != src_name)
                         .await?;
                     *self.incs.write() = incs;
                 }
-            }
-            Ok(())
-        })
+
+                res.err.parse()?
+            } else {
+                Default::default()
+            })
+        }
+        .boxed_local()
+    }
+}
+
+#[derive(Debug, Clone, qjs::IntoJs)]
+pub struct LinkOutput {
+    pub out: Artifact<Input, Actual>,
+    pub map: Artifact<Input, Actual>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LinkOptions {
+    output: FileKind,
+    script: Option<Artifact<Input, Actual>>,
+}
+
+impl<'js> qjs::FromJs<'js> for LinkOptions {
+    fn from_js(_ctx: qjs::Ctx<'js>, val: qjs::Value<'js>) -> qjs::Result<Self> {
+        let obj: qjs::Object = val.get()?;
+        let output = if obj.contains_key("type")? {
+            val.get()?
+        } else {
+            Default::default()
+        };
+        let script = obj.get("script")?;
+
+        Ok(Self { output, script })
     }
 }
 
 pub(self) struct LinkInternal {
     cfg: CompilerConfig,
-    link: bool, // link or archive
-    args: Vec<String>,
+    out_kind: FileKind,
     objs: Set<Artifact<Input, Actual>>,
     script: Option<Artifact<Input, Actual>>,
     out: WeakArtifact<Output, Actual>,
+    map: WeakArtifact<Output, Actual>,
 }
 
 impl Drop for LinkInternal {
@@ -380,30 +527,58 @@ impl RuleApi for LinkInternal {
             .collect()
     }
 
-    fn invoke(self: Ref<Self>) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-        Box::pin(async move {
+    fn invoke(self: Ref<Self>) -> BoxedFuture<Result<Diagnostics>> {
+        async move {
             log::debug!("Link::invoke");
-            if self.out.try_ref().is_some() {
-                let cmd = if self.link {
-                    &self.cfg.0.props.cc
+            Ok(if let Some(out) = self.out.try_ref() {
+                let (cmd, mut args) = if matches!(self.out_kind, FileKind::Static { .. }) {
+                    (&self.cfg.0.props.ar, vec!["cr".into(), out.name().clone()])
                 } else {
-                    &self.cfg.0.props.ar
+                    let mut args = self.cfg.link_opts();
+
+                    args.push("-o".into());
+                    args.push(out.name().clone());
+
+                    if matches!(self.out_kind, FileKind::Dynamic { .. }) {
+                        args.push("-shared".into());
+                    }
+
+                    if let Some(script) = &self.script {
+                        args.push("-T".into());
+                        args.push(script.name().clone());
+                    }
+
+                    if let Some(map) = self.map.try_ref() {
+                        args.push(format!("-Wl,-Map,{}", map.name()));
+                    }
+
+                    (&self.cfg.0.props.cc, args)
                 };
-                let res = exec_out(cmd, &self.args).await?;
+
+                args.extend(self.objs.iter().map(|obj| obj.name().clone()));
+
+                let res = exec_out(cmd, &args).await?;
                 log_out!(res);
-                res.success()?;
-            }
-            Ok(())
-        })
+                res.err.parse()?
+            } else {
+                Default::default()
+            })
+        }
+        .boxed_local()
     }
+}
+
+#[derive(Debug, Clone, qjs::IntoJs)]
+pub struct StripOutput {
+    pub out: Artifact<Input, Actual>,
+    pub strip: Option<Artifact<Input, Actual>>,
 }
 
 pub(self) struct StripInternal {
     cfg: CompilerConfig,
-    args: Vec<String>,
     obj: Artifact<Input, Actual>,
     out: WeakArtifact<Output, Actual>,
-    info: WeakArtifact<Output, Actual>,
+    strip_out: Option<WeakArtifact<Output, Actual>>,
 }
 
 impl Drop for StripInternal {
@@ -423,145 +598,114 @@ impl RuleApi for StripInternal {
             .map(|input| input.into_kind_any())
             .into_iter()
             .chain(
-                self.info
-                    .try_ref()
-                    .map(|input| input.into_kind_any())
-                    .into_iter(),
+                self.strip_out
+                    .as_ref()
+                    .and_then(|out| out.try_ref().map(|input| input.into_kind_any())),
             )
             .collect()
     }
 
-    fn invoke(self: Ref<Self>) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-        Box::pin(async move {
+    fn invoke(self: Ref<Self>) -> BoxedFuture<Result<Diagnostics>> {
+        async move {
             log::debug!("Strip::invoke");
-            if self.out.try_ref().is_some() {
-                let res = exec_out(&self.cfg.0.props.strip, &self.args).await?;
+            if let Some(out) = self.out.try_ref() {
+                let mut args = self.cfg.strip_opts();
+
+                if let Some(strip_out) = self.strip_out.as_ref() {
+                    if let Some(strip_out) = strip_out.try_ref() {
+                        args.push("-o".into());
+                        args.push(strip_out.name().clone());
+                    }
+                }
+
+                args.push(out.name().clone());
+
+                let res = exec_out(&self.cfg.0.props.strip, &args).await?;
                 log_out!(res);
                 res.success()?;
             }
-            Ok(())
-        })
-    }
-}
-
-enum CInputKind {
-    C,
-    Cxx,
-    Asm,
-}
-
-impl FromStr for CInputKind {
-    type Err = ();
-
-    fn from_str(s: &str) -> StdResult<Self, Self::Err> {
-        match s {
-            "c" => Ok(Self::C),
-            "cpp" | "cxx" | "c++" => Ok(Self::Cxx),
-            "S" | "s" | "asm" => Ok(Self::Asm),
-            _ => Err(()),
+            Ok(Default::default())
         }
-    }
-}
-
-impl CInputKind {
-    pub fn from_name(name: impl AsRef<str>) -> Result<Self> {
-        let name = name.as_ref();
-        let ext = name
-            .rsplit('.')
-            .next()
-            .ok_or_else(|| format!("Unable to determine extension of source file `{}`", name))?;
-        let kind =
-            Self::from_str(ext).map_err(|_| format!("Unknown source file extension `{}`", ext))?;
-        Ok(kind)
-    }
-}
-
-enum COutputKind {
-    Cpp,
-    Asm,
-    Obj,
-}
-
-impl AsRef<str> for COutputKind {
-    fn as_ref(&self) -> &str {
-        match self {
-            Self::Cpp => "cpp",
-            Self::Asm => "s",
-            Self::Obj => "o",
-        }
-    }
-}
-
-impl COutputKind {
-    pub fn make_extension<'a>(&'a self, name: &'a str) -> &'a str {
-        if let Self::Cpp = self {
-            name.rsplit('.').next().unwrap_or(self.as_ref())
-        } else {
-            self.as_ref()
-        }
+        .boxed_local()
     }
 }
 
 impl CompilerConfig {
-    async fn cc_raw(
+    async fn compile(
         self,
-        outdir: Directory,
         src: Artifact<Input, Actual>,
-        outkind: COutputKind,
+        out_dir: Directory,
+        opts: Option<CompileOptions>,
     ) -> Result<Artifact<Input, Actual>> {
-        let cfg = self;
+        let opts = opts.unwrap_or_default();
+
+        let out_kind = opts.output;
         let src_name = src.name().clone();
 
-        let inkind = CInputKind::from_name(&src_name)?;
-        let cfg_hash = cfg.0.compile_hash.clone();
+        let in_kind = if let Some(kind) = opts.input {
+            kind
+        } else {
+            CInputKind::from_name(&src_name)?
+        };
 
-        let dst_ext = outkind.make_extension(&src_name);
-        let dst_name = format!("{}.{}.{}", src_name, cfg_hash, dst_ext);
-        let dst = outdir.output(dst_name).await?;
-        let dst_name = dst.name().clone();
+        if matches!(in_kind, CInputKind::D) {
+            if self.0.props.dc.is_none() {
+                Err(format!("No D compiler found to build `{}`", src_name))?;
+            }
 
-        let dep_name = format!("{}.dep", dst_name);
+            if matches!(out_kind, COutputKind::Cpp) {
+                Err(format!(
+                    "Unable preprocess `{}` because D-lang does not support C-preprocessor",
+                    src_name
+                ))?;
+            }
+        }
+
+        if matches!(self.0.props.kind, CompilerKind::Gcc)
+            && matches!(out_kind, COutputKind::Ir | COutputKind::Bc)
+        {
+            Err(format!(
+                "Output intermediate reprepresentation for `{}` from GCC is experimental and does not supported yet",
+                src_name
+            ))?;
+        }
+
+        let hash = self.hash();
+        let out_dir = out_dir.child(&hash);
+
+        let dst_ext = out_kind.make_extension(&src_name);
+        let dst_name = format!("{}.{}", src_name, dst_ext);
+        let dst = out_dir.output(dst_name).await?;
+
+        let dep_name = format!("{}.dep", dst.name());
         let dep_path = PathBuf::from(&dep_name);
 
-        let store: &ArtifactStore = outdir.as_ref();
+        let dep_kind = if matches!(in_kind, CInputKind::D)
+            && matches!(self.0.props.kind, CompilerKind::Llvm)
+        {
+            DepKind::D
+        } else {
+            DepKind::default()
+        };
+
+        let store: &ArtifactStore = out_dir.as_ref();
         let incs = if dep_path.is_file().await {
             // preload already generated deps
-            store.read_deps(&dep_path, |src| src != &src_name).await?
+            store
+                .read_deps(&dep_path, dep_kind, |src| src != &src_name)
+                .await?
         } else {
             // deps will be generated under compilation
             Default::default()
         };
 
-        let inopt = match inkind {
-            CInputKind::C => "-xc",
-            CInputKind::Cxx => "-xc++",
-            CInputKind::Asm => "-xassembler",
-        };
-
-        let outopt = match outkind {
-            COutputKind::Cpp => "-E",
-            COutputKind::Asm => "-S",
-            COutputKind::Obj => "-c",
-        };
-
-        let mut args = vec![
-            inopt.into(),
-            outopt.into(),
-            "-MMD".into(),
-            "-MF".into(),
-            dep_name,
-            "-o".into(),
-            dst_name,
-            src_name,
-        ];
-        args.extend(cfg.0.compile_opts.iter().cloned());
-
         log::debug!("Compile::new");
 
         let rule = Ref::new(CompileInternal {
-            cfg,
+            cfg: self.clone(),
             store: store.clone(),
-            args,
+            in_kind,
+            out_kind,
             src,
             dep: dep_path,
             incs: Mut::new(incs),
@@ -573,59 +717,52 @@ impl CompilerConfig {
         Ok(dst.into())
     }
 
-    async fn ld_raw(
+    async fn link(
         self,
-        outdir: Directory,
-        name: impl AsRef<str>,
-        kind: FileKind,
         objs: Set<Artifact<Input, Actual>>,
-        script: Option<Artifact<Input, Actual>>,
-    ) -> Result<Artifact<Input, Actual>> {
-        let cfg = self;
-        let objs_names = objs.iter().map(|obj| obj.name()).cloned();
+        out_dir: Directory,
+        out_name: impl AsRef<str>,
+        opts: Option<LinkOptions>,
+    ) -> Result<LinkOutput> {
+        let opts = opts.unwrap_or_default();
 
-        let out_name = kind.file_name(&cfg.0.props.platform, name);
-        let out = outdir.output(out_name).await?;
-        let out_name = out.name().clone();
+        let script = opts.script;
+        let out_kind = opts.output;
 
-        let link = !matches!(kind, FileKind::Static { .. });
+        let out_name = out_kind.file_name(&self.0.props.platform, out_name);
+        let out = out_dir.output(&out_name).await?;
 
         let map_name = format!("{}.map", out_name);
-        let mut args = vec![if link { "-o" } else { "cr" }.into(), out_name];
-        args.extend(objs_names);
-        if link {
-            if matches!(kind, FileKind::Dynamic { .. }) {
-                args.push("-shared".into());
-            }
-            args.extend(cfg.0.link_opts.iter().cloned());
-            if let Some(script) = &script {
-                args.push(format!("-T{}", script.name()));
-            }
-            args.push(format!("-Wl,-Map,{}", map_name));
-        }
+        let map = out_dir.output(map_name).await?;
 
         log::debug!("Link::new");
 
         let rule = Ref::new(LinkInternal {
-            cfg,
-            link,
-            args,
+            cfg: self.clone(),
+            out_kind,
             objs,
             script,
             out: out.weak(),
+            map: map.weak(),
         });
 
-        out.set_rule(Rule::from_api(rule));
+        let rule = Rule::from_api(rule);
 
-        Ok(out.into())
+        out.set_rule(rule.clone());
+        map.set_rule(rule);
+
+        Ok(LinkOutput {
+            out: out.into(),
+            map: map.into(),
+        })
     }
 
-    async fn strip_raw(
+    async fn strip(
         self,
-        outdir: Directory,
         obj: Artifact<Input, Actual>,
-    ) -> Result<(Artifact<Input, Actual>, Artifact<Input, Actual>)> {
-        let cfg = self;
+        out_dir: Directory,
+        strip_dir: Option<Directory>,
+    ) -> Result<StripOutput> {
         let obj_name = obj.name().clone();
 
         let out_name = Path::new(&obj_name)
@@ -633,32 +770,61 @@ impl CompilerConfig {
             .ok_or_else(|| format!("Unable to determine file name to strip `{}`", obj_name))?
             .to_str()
             .unwrap();
-        let out = outdir.output(out_name).await?;
-        let out_name = out.name().clone();
-        let info_name = format!("{}.strip", out_name);
-        let info = outdir.output(info_name).await?;
-        let info_name = info.name().clone();
-
-        let mut args = Vec::default();
-        args.extend(cfg.0.strip_opts.iter().cloned());
-        args.push("-o".into());
-        args.push(info_name);
-        args.push(out_name);
+        let out = out_dir.output(out_name).await?;
+        let strip_out = if let Some(strip_dir) = &strip_dir {
+            Some(strip_dir.output(out_name).await?)
+        } else {
+            None
+        };
 
         log::debug!("Strip::new");
 
         let rule = Ref::new(StripInternal {
-            cfg,
-            args,
+            cfg: self.clone(),
             obj,
             out: out.weak(),
-            info: info.weak(),
+            strip_out: strip_out.as_ref().map(|out| out.weak()),
         });
 
-        out.set_rule(Rule::from_api(rule.clone()));
-        info.set_rule(Rule::from_api(rule));
+        let rule = Rule::from_api(rule);
+        if let Some(strip_out) = &strip_out {
+            out.set_rule(rule.clone());
+            strip_out.set_rule(rule);
+        } else {
+            out.set_rule(rule);
+        }
 
-        Ok((out.into(), info.into()))
+        Ok(StripOutput {
+            out: out.into(),
+            strip: strip_out.map(|out| out.into()),
+        })
+    }
+
+    pub async fn get(&self, name: impl AsRef<str>) -> Result<String> {
+        let mut args = self.base_opts();
+        args.push(format!("-print-{}", name.as_ref()));
+
+        Ok(exec_out(&self.0.props.cc, &args)
+            .await?
+            .success()?
+            .out
+            .trim()
+            .into())
+    }
+
+    #[inline]
+    pub async fn sysroot(&self) -> Result<String> {
+        self.get("sysroot").await
+    }
+
+    #[inline]
+    pub async fn multidir(&self) -> Result<String> {
+        self.get("multi-directory").await
+    }
+
+    #[inline]
+    pub async fn builtins(&self) -> Result<String> {
+        self.get("libgcc-file-name").await
     }
 }
 
@@ -690,8 +856,8 @@ impl RuleApi for LdScriptInternal {
             .collect()
     }
 
-    fn invoke(self: Ref<Self>) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-        Box::pin(async move {
+    fn invoke(self: Ref<Self>) -> BoxedFuture<Result<Diagnostics>> {
+        async move {
             log::debug!("LdScript::invoke");
 
             if let Some(out) = self.out.try_ref() {
@@ -701,8 +867,9 @@ impl RuleApi for LdScriptInternal {
                 write_file(out.name(), content).await?;
             }
 
-            Ok(())
-        })
+            Ok(Default::default())
+        }
+        .boxed_local()
     }
 }
 
@@ -728,26 +895,6 @@ impl LdScriptInternal {
 
         Ok(out.into())
     }
-}
-
-#[derive(Debug, Clone, Copy, Default, qjs::FromJs)]
-pub struct ArOptions {
-    #[quickjs(default = "library_default")]
-    library: bool,
-}
-
-#[derive(Debug, Clone, Default, qjs::FromJs)]
-pub struct LdOptions {
-    #[quickjs(default)]
-    dynamic: bool,
-    #[quickjs(default = "library_default")]
-    library: bool,
-    version: Option<SemVer>,
-    script: Option<Artifact<Input, Actual>>,
-}
-
-const fn library_default() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Default, qjs::FromJs)]
@@ -801,17 +948,17 @@ mod js {
             Ok(Self(Ref::new(intern)))
         }
 
-        #[quickjs(rename = "ccPath", get, enumerable)]
+        #[quickjs(get, enumerable)]
         pub fn cc_path(&self) -> &String {
             &self.0.props.cc
         }
 
-        #[quickjs(rename = "arPath", get, enumerable)]
+        #[quickjs(get, enumerable)]
         pub fn ar_path(&self) -> &String {
             &self.0.props.ar
         }
 
-        #[quickjs(rename = "nmPath", get, enumerable)]
+        #[quickjs(get, enumerable)]
         pub fn nm_path(&self) -> &String {
             &self.0.props.nm
         }
@@ -831,19 +978,32 @@ mod js {
             &self.0.props.target
         }
 
-        #[quickjs(get, enumerable)]
-        pub async fn sysroot(self) -> Result<String> {
-            Ok(exec_out(&self.0.props.cc, &["-print-sysroot"])
-                .await?
-                .success()?
-                .out
-                .trim()
-                .into())
+        #[quickjs(rename = "options", get, enumerable)]
+        pub fn options_js(&self) -> ToolchainOpts {
+            self.0.opts.clone()
+        }
+
+        #[quickjs(rename = "sysroot", get, enumerable)]
+        pub async fn sysroot_js(self) -> Result<String> {
+            self.sysroot().await
+        }
+
+        #[quickjs(rename = "multidir", get, enumerable)]
+        pub async fn multidir_js(self) -> Result<String> {
+            self.multidir().await
+        }
+
+        #[quickjs(rename = "builtins", get, enumerable)]
+        pub async fn builtins_js(self) -> Result<String> {
+            self.builtins().await
         }
 
         #[quickjs(get, enumerable)]
         pub async fn search_dirs(self) -> Result<Vec<String>> {
-            Ok(exec_out(&self.0.props.cc, &["-print-search-dirs"])
+            let mut args = self.base_opts();
+            args.push("-print-search-dirs".into());
+
+            Ok(exec_out(&self.0.props.cc, &args)
                 .await?
                 .success()?
                 .out
@@ -853,81 +1013,59 @@ mod js {
                 .collect())
         }
 
-        /// Compile with object output
-        pub async fn cc(
-            self,
-            outdir: Directory,
-            src: Artifact<Input, Actual>,
-        ) -> Result<Artifact<Input, Actual>> {
-            self.cc_raw(outdir, src, COutputKind::Obj).await
-        }
+        #[quickjs(get, enumerable, hide)]
+        pub fn hash(&self) -> String {}
 
-        /// Preprocess only without compilation
-        pub async fn cpp(
-            self,
-            outdir: Directory,
-            src: Artifact<Input, Actual>,
-        ) -> Result<Artifact<Input, Actual>> {
-            self.cc_raw(outdir, src, COutputKind::Cpp).await
-        }
+        #[quickjs(get, enumerable, hide)]
+        pub fn c_opts(&self) -> Vec<String> {}
 
-        /// Compile with assembler output
-        pub async fn asm(
-            self,
-            outdir: Directory,
-            src: Artifact<Input, Actual>,
-        ) -> Result<Artifact<Input, Actual>> {
-            self.cc_raw(outdir, src, COutputKind::Asm).await
-        }
+        #[quickjs(get, enumerable, hide)]
+        pub fn cxx_opts(&self) -> Vec<String> {}
 
-        /// Archive objects to static library
-        pub async fn ar(
+        #[quickjs(get, enumerable, hide)]
+        pub fn d_opts(&self) -> Vec<String> {}
+
+        #[quickjs(get, enumerable, hide)]
+        pub fn link_opts(&self) -> Vec<String> {}
+
+        #[quickjs(get, enumerable, hide)]
+        pub fn dump_opts(&self) -> Vec<String> {}
+
+        #[quickjs(get, enumerable, hide)]
+        pub fn strip_opts(&self) -> Vec<String> {}
+
+        /// Compile source
+        #[quickjs(rename = "compile")]
+        pub async fn compile_js(
             self,
-            outdir: Directory,
-            name: String,
-            objs: Set<Artifact<Input, Actual>>,
-            opts: qjs::Opt<ArOptions>,
+            out_dir: Directory,
+            src: Artifact<Input, Actual>,
+            opts: qjs::Opt<CompileOptions>,
         ) -> Result<Artifact<Input, Actual>> {
-            let ArOptions { library } = opts.0.unwrap_or_default();
-            self.ld_raw(outdir, name, FileKind::Static { library }, objs, None)
-                .await
+            self.compile(src, out_dir, opts.0).await
         }
 
         /// Link objects
-        pub async fn ld(
+        #[quickjs(rename = "link")]
+        pub async fn link_js(
             self,
-            outdir: Directory,
-            name: String,
+            out_dir: Directory,
+            out_name: String,
             objs: Set<Artifact<Input, Actual>>,
-            opts: qjs::Opt<LdOptions>,
-        ) -> Result<Artifact<Input, Actual>> {
-            let LdOptions {
-                dynamic,
-                library,
-                version,
-                script,
-            } = opts.0.unwrap_or_default();
-            self.ld_raw(
-                outdir,
-                name,
-                if dynamic {
-                    FileKind::Dynamic { library, version }
-                } else {
-                    FileKind::Executable
-                },
-                objs,
-                script,
-            )
-            .await
+            opts: qjs::Opt<LinkOptions>,
+        ) -> Result<LinkOutput> {
+            self.link(objs, out_dir, out_name, opts.0).await
         }
 
         /// Strip objects
-        pub async fn strip(
+        #[quickjs(rename = "strip")]
+        pub async fn strip_js(
             self,
-            outdir: Directory,
             obj: Artifact<Input, Actual>,
-        ) -> Result<(Artifact<Input, Actual>, Artifact<Input, Actual>)> {
-            self.strip_raw(outdir, obj).await
+            out_dir: Directory,
+            strip_dir: qjs::Opt<Directory>,
+        ) -> Result<StripOutput> {
+            self.strip(obj, out_dir, strip_dir.0).await
         }
 
         /// Measure size

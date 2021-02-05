@@ -223,6 +223,14 @@ impl State {
             let globals = ctx.globals();
             globals.init_def::<gear::ExtensionsJs>()?;
             globals.init_def::<gear::ConsoleJs>()?;
+            qjs::Module::new(
+                ctx,
+                "<preload>",
+                r#"
+                import 'gear';
+                "#,
+            )?
+            .eval()?;
             Ok(())
         })?;
 

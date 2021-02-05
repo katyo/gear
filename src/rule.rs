@@ -1,18 +1,17 @@
 use crate::{
     qjs,
     system::{create_dir_all, Path},
-    Artifact, Input, Mut, Output, ParallelSend, ParallelSync, Ref, Result, Set, Time, WeakArtifact,
-    WeakSet,
+    Artifact, BoxedFuture, Diagnostics, Input, Mut, Output, ParallelSend, ParallelSync, Ref,
+    Result, Set, Time, WeakArtifact, WeakSet,
 };
 use derive_deref::Deref;
 use either::Either;
+use futures::future::FutureExt;
 use serde::Serialize;
 use std::{
     fmt::{Display, Formatter, Result as FmtResult},
-    future::Future,
     hash::{Hash, Hasher},
     iter::once,
-    pin::Pin,
 };
 
 /// The unique identifier of rule
@@ -54,19 +53,22 @@ pub trait RuleApi: ParallelSend + ParallelSync {
     fn outputs(&self) -> Vec<Artifact<Output>>;
 
     /// Run rule
-    fn invoke(self: Ref<Self>) -> Pin<Box<dyn Future<Output = Result<()>>>>;
+    fn invoke(self: Ref<Self>) -> BoxedFuture<Result<Diagnostics>>;
 }
 
 #[derive(Clone)]
-pub struct Rule {
+pub struct Rule(Ref<Internal>);
+
+struct Internal {
     id: RuleId,
-    state: Ref<Mut<RuleState>>,
+    state: Mut<RuleState>,
+    diagnostics: Mut<Diagnostics>,
     api: Ref<dyn RuleApi>,
 }
 
 impl PartialEq for Rule {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.0.id == other.0.id
     }
 }
 
@@ -74,14 +76,14 @@ impl Eq for Rule {}
 
 impl Hash for Rule {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
+        self.0.id.hash(state);
     }
 }
 
 impl Display for Rule {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         "Rule #".fmt(f)?;
-        self.id.fmt(f)
+        self.0.id.fmt(f)
     }
 }
 
@@ -92,46 +94,59 @@ impl Rule {
             output.hash(&mut hasher);
         }
         let id = hasher.finish();
-        let state = Ref::new(Mut::new(RuleState::default()));
+        let state = Mut::new(RuleState::default());
+        let diagnostics = Mut::new(Diagnostics::default());
 
-        Self { id, api, state }
+        Self(Ref::new(Internal {
+            id,
+            api,
+            state,
+            diagnostics,
+        }))
     }
 
     pub fn id(&self) -> RuleId {
-        self.id
+        self.0.id
     }
 
     pub fn state(&self) -> RuleState {
-        *self.state.read()
+        *self.0.state.read()
     }
 
     pub fn ready_inputs(&self) -> bool {
-        let inputs = self.api.inputs();
+        let inputs = self.0.api.inputs();
         inputs.is_empty() || !inputs.into_iter().any(|input| input.outdated())
     }
 
     pub fn schedule(&self) {
-        *self.state.write() = RuleState::Scheduled;
+        *self.0.state.write() = RuleState::Scheduled;
     }
 
     pub async fn process(&self) -> Result<()> {
         {
-            *self.state.write() = RuleState::Processing;
+            *self.0.state.write() = RuleState::Processing;
         }
-        for output in self.api.outputs() {
+        for output in self.0.api.outputs() {
             if let Some(dir) = Path::new(output.name()).parent() {
                 if !dir.is_dir().await {
                     create_dir_all(dir).await?;
                 }
             }
         }
-        self.api.clone().invoke().await?;
+        let diagnostics = self.0.api.clone().invoke().await?;
+        let is_failed = diagnostics.is_failed();
+        {
+            *self.0.diagnostics.write() = diagnostics;
+        }
+        if is_failed {
+            Err(format!("Failed processing rule"))?;
+        }
         let time = Time::now();
-        for output in self.api.outputs() {
+        for output in self.0.api.outputs() {
             output.set_time(time);
         }
         {
-            *self.state.write() = RuleState::Processed;
+            *self.0.state.write() = RuleState::Processed;
         }
         Ok(())
     }
@@ -186,8 +201,8 @@ impl RuleApi for NoInternal {
         self.outputs.iter().collect()
     }
 
-    fn invoke(self: Ref<Self>) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-        Box::pin(async { Ok(()) })
+    fn invoke(self: Ref<Self>) -> BoxedFuture<Result<Diagnostics>> {
+        async { Ok(Diagnostics::default()) }.boxed_local()
     }
 }
 
@@ -259,15 +274,16 @@ impl RuleApi for JsInternal {
         self.outputs.iter().collect()
     }
 
-    fn invoke(self: Ref<Self>) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    fn invoke(self: Ref<Self>) -> BoxedFuture<Result<Diagnostics>> {
         let function = self.function.clone();
         let context = self.context.clone();
         let this = JsRule(self);
-        Box::pin(async move {
-            let promise: qjs::Promise<()> =
+        async move {
+            let promise: qjs::Promise<_> =
                 context.with(|ctx| function.restore(ctx)?.call((qjs::This(this),)))?;
             Ok(promise.await?)
-        })
+        }
+        .boxed_local()
     }
 }
 
@@ -284,12 +300,12 @@ mod js {
 
         #[quickjs(get, enumerable)]
         pub fn inputs(&self) -> Vec<Artifact<Input>> {
-            self.api.inputs()
+            self.0.api.inputs()
         }
 
         #[quickjs(get, enumerable)]
         pub fn outputs(&self) -> Vec<Artifact<Output>> {
-            self.api.outputs()
+            self.0.api.outputs()
         }
 
         #[quickjs(rename = "toString")]

@@ -50,13 +50,27 @@ impl<'js> qjs::IntoJs<'js> for SemVer {
 pub enum FileKind {
     Executable,
     Dynamic {
+        // library or plugin style
+        #[quickjs(default = "default_true")]
         library: bool,
         version: Option<SemVer>,
     },
     Static {
+        // library or whole archive
+        #[quickjs(default = "default_true")]
         library: bool,
     },
     Object,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+impl Default for FileKind {
+    fn default() -> Self {
+        Self::Executable
+    }
 }
 
 impl FileKind {

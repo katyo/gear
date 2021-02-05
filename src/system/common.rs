@@ -1,3 +1,4 @@
+use crate::{Result, Time};
 pub use async_std::{
     fs::{create_dir_all, read as read_file, remove_file, write as write_file},
     path::{Path, PathBuf},
@@ -5,13 +6,11 @@ pub use async_std::{
     process::{Command, ExitStatus, Stdio},
     task::{spawn_blocking, spawn_local as spawn},
 };
-pub use relative_path::*;
-pub use rquickjs as qjs;
-
-use crate::{Result, Time};
+use futures::future::join_all;
 use std::ffi::{OsStr, OsString};
 
 pub use faccess::AccessMode;
+pub use relative_path::*;
 
 /// Get modified time
 pub async fn modified(path: &Path) -> Result<Time> {
@@ -60,6 +59,14 @@ pub async fn which(name: impl AsRef<OsStr>) -> Option<PathBuf> {
     spawn_blocking(move || which::which(&*name).ok().map(|path| path.into())).await
 }
 
+/// Find executable by name in known paths
+pub async fn which_any<N: AsRef<OsStr>>(names: impl IntoIterator<Item = N>) -> Option<PathBuf> {
+    join_all(names.into_iter().map(which))
+        .await
+        .into_iter()
+        .fold(None, |pre, cur| pre.or(cur))
+}
+
 pub struct ExecOut<R> {
     pub cmd: String,
     pub res: R,
@@ -97,6 +104,14 @@ pub async fn exec_out(
     args: &[impl AsRef<OsStr>],
 ) -> Result<ExecOut<ExitStatus>> {
     let cmd = cmd.as_ref();
+
+    let mut cmd_line = cmd.to_str().unwrap_or("<invalid-utf8>").to_string();
+    for arg in args {
+        cmd_line.push(' ');
+        cmd_line.push_str(arg.as_ref().to_str().unwrap_or("<invalid-utf8>"));
+    }
+
+    log::debug!("Exec `{}`", cmd_line);
     let out = Command::new(cmd)
         .args(args)
         .env("LANG", "C")
@@ -104,7 +119,7 @@ pub async fn exec_out(
         .output()
         .await?;
     Ok(ExecOut {
-        cmd: format!("{:?}", cmd),
+        cmd: cmd_line,
         res: out.status,
         out: String::from_utf8(out.stdout)?,
         err: String::from_utf8(out.stderr)?,

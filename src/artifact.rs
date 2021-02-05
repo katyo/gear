@@ -102,7 +102,7 @@ impl IsArtifactUsage for Input {
     const NAME: &'static str = "input";
     const TYPE: ArtifactType = ArtifactType::Source;
 
-    fn reusable<U, K>(artifact: &Artifact<U, K>) -> bool {
+    fn reusable<U, K>(_artifact: &Artifact<U, K>) -> bool {
         true
     }
 }

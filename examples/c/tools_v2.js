@@ -2,10 +2,8 @@ import { Compiler } from "toolchain";
 
 export default async function({obj_dir, lib_dir, bin_dir, inc_dirs = [], cdefs = {}, cflags = []}) {
     const compiler = (await Compiler.detect({ compiler: "clang" })).config({
-        common: {
-            flags: cflags,
-        },
-        compile: {
+        flags: cflags,
+        cc: {
             defs: cdefs,
             dirs: inc_dirs.map(dir => dir.path),
         },
@@ -13,22 +11,21 @@ export default async function({obj_dir, lib_dir, bin_dir, inc_dirs = [], cdefs =
 
     // C Compiler
     async function cc(src) {
-        return await compiler.cc(obj_dir, src);
+        return await compiler.compile(obj_dir, src);
     }
 
     // Archiver
     async function ar(name, objs) {
-        return await compiler.ar(lib_dir, name, objs);
+        return (await compiler.link(lib_dir, name, objs, { type: "static" })).out;
     }
 
     // Linker
     async function ld(name, objs, libs = []) {
-        console.log(objs);
-        return await compiler.config({
+        return (await compiler.config({
             link: {
                 libs,
             }
-        }).ld(bin_dir, name, objs);
+        }).link(bin_dir, name, objs)).out;
     }
 
     return {cc, ar, ld};

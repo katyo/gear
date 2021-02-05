@@ -1,6 +1,7 @@
 mod artifact;
 mod compiler;
 mod console;
+mod diagnostic;
 mod directory;
 mod extensions;
 mod hasher;
@@ -23,6 +24,9 @@ pub use std::time::{Duration, SystemTime as Time};
 pub use weak_table::traits::{WeakElement, WeakKey};
 
 pub use artifact::{Actual, Artifact, ArtifactStore, Input, Output, Phony, WeakArtifact};
+pub use diagnostic::{
+    Diagnostic, Diagnostics, FixingSuggestion, Location, Severity, TextPoint, TextSpan,
+};
 pub use directory::Directory;
 pub use hasher::DataHasher;
 pub use processor::RuleStateChange;
@@ -46,6 +50,7 @@ pub use variable::Js as VariableJs;
 
 pub use compiler::{CompilerJs, SymbolInfo, SymbolsJs};
 
+use futures::future::LocalBoxFuture;
 use fxhash::FxBuildHasher;
 use indexmap::{IndexMap, IndexSet};
 use weak_table::WeakHashSet;
@@ -53,3 +58,4 @@ use weak_table::WeakHashSet;
 pub type Set<T> = IndexSet<T, FxBuildHasher>;
 pub type Map<K, V> = IndexMap<K, V, FxBuildHasher>;
 pub type WeakSet<T> = WeakHashSet<T, FxBuildHasher>;
+pub type BoxedFuture<T> = LocalBoxFuture<'static, T>;

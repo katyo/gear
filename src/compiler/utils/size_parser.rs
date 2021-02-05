@@ -1,8 +1,8 @@
 use crate::{qjs, Error, Map, Result, Set};
 use nom::{
     bytes::complete::{is_not, tag},
-    character::complete::{char, digit1, newline, space1},
-    combinator::{map, map_res, opt},
+    character::complete::{char, digit1, line_ending, space1},
+    combinator::{all_consuming, map, map_res, opt},
     multi::separated_list0,
     sequence::{delimited, tuple},
     Err as IErr, IResult,
@@ -24,18 +24,14 @@ impl FromStr for SizeInfo {
     type Err = Error;
 
     fn from_str(input: &str) -> Result<Self> {
-        let (input, result) = Self::parse_sysv(input)
+        Ok(all_consuming(Self::parse_sysv)(input)
             .map_err(|error| match error {
                 IErr::Error(error) => error.input,
                 IErr::Failure(error) => error.input,
                 _ => unreachable!(),
             })
-            .map_err(|input| format!("Error when parsing size info: `{}`", input))?;
-        if input.is_empty() {
-            Ok(result)
-        } else {
-            Err(format!("Error when parsing size info: `{}`", input).into())
-        }
+            .map_err(|input| format!("Error while parsing size info: `{}`", input))?
+            .1)
     }
 }
 
@@ -140,13 +136,13 @@ impl ObjectSizeInfo {
         map(
             tuple((
                 Self::parse_sysv_head,
-                newline,
+                line_ending,
                 tuple((tag("section"), space1, tag("size"), space1, tag("addr"))),
-                newline,
-                separated_list0(newline, SectionSizeInfo::parse_sysv),
-                newline,
+                line_ending,
+                separated_list0(line_ending, SectionSizeInfo::parse_sysv),
+                line_ending,
                 Self::parse_sysv_size,
-                newline,
+                line_ending,
             )),
             |((name, archive), _, _, _, sections, _, size, _)| {
                 let sections = sections.into_iter().collect();
